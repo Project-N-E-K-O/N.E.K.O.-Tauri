@@ -59,6 +59,31 @@ pub(crate) fn prepare_process_environment() {
 
 pub(crate) fn configure_app(_app: &tauri::App) {}
 
+fn is_kde_desktop_value(value: &str) -> bool {
+    value
+        .split([':', ';', ','])
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .any(|token| {
+            token == "kde"
+                || token.starts_with("kde-")
+                || token.contains("plasma")
+                || token.ends_with("/kde")
+        })
+}
+
+fn is_kde_desktop() -> bool {
+    [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+    ]
+    .iter()
+    .filter_map(|name| std::env::var(name).ok())
+    .any(|value| is_kde_desktop_value(&value))
+}
+
 fn is_trusted_media_origin(uri: &str) -> bool {
     let Ok(url) = tauri::Url::parse(uri) else {
         return false;
@@ -130,7 +155,17 @@ pub(crate) fn configure_main_window(
 ) -> Result<(), String> {
     configure_media_permissions(window)?;
     configure_overlay(window)?;
-    resize_to_virtual_desktop(window)?;
+    if is_kde_desktop() {
+        // KWin constrains even oversized NORMAL windows to _NET_WORKAREA.
+        // FULLSCREEN is the supported EWMH state that covers the complete
+        // physical output instead of the panel-reserved work area.
+        window
+            .set_fullscreen(true)
+            .map_err(|error| format!("无法将 KDE 主窗口设为全屏覆盖层: {error}"))?;
+        println!("[WindowBounds] KDE 全屏覆盖状态已请求");
+    } else {
+        resize_to_virtual_desktop(window)?;
+    }
     window
         .set_always_on_top(true)
         .map_err(|error| format!("无法将 Linux 主窗口置顶: {error}"))
@@ -139,10 +174,20 @@ pub(crate) fn configure_main_window(
 fn configure_overlay(window: &tauri::WebviewWindow) -> Result<(), String> {
     let gtk_window = window.gtk_window().map_err(|error| error.to_string())?;
 
-    // GNOME/Mutter can leave a maximized transparent NORMAL window below the
-    // active application even while _NET_WM_STATE_ABOVE is present. A dock is
-    // semantically closer to this desktop overlay.
-    gtk_window.set_type_hint(gdk::WindowTypeHint::Dock);
+    if is_kde_desktop() {
+        // KWin constrains DOCK windows to _NET_WORKAREA. On a desktop with
+        // panels that turns a 2560x1600 overlay into (for example) 2560x1488,
+        // producing a visible boundary and clipping avatars near the bottom.
+        // NORMAL + keep_above preserves full physical-monitor bounds on KDE.
+        gtk_window.set_type_hint(gdk::WindowTypeHint::Normal);
+        println!("[WindowType] KDE/Plasma detected; using NORMAL full-screen overlay");
+    } else {
+        // GNOME/Mutter can leave a maximized transparent NORMAL window below
+        // the active application even while _NET_WM_STATE_ABOVE is present.
+        // A dock is semantically closer to this desktop overlay there.
+        gtk_window.set_type_hint(gdk::WindowTypeHint::Dock);
+        println!("[WindowType] non-KDE desktop detected; using DOCK overlay");
+    }
     gtk_window.set_keep_above(true);
     gtk_window.stick();
     Ok(())
@@ -556,9 +601,27 @@ pub(crate) fn open_settings_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_trusted_media_origin, pointer_input_rectangles, static_input_region_diagnostic,
-        InputRectangle, INPUT_SENTINEL, STATIC_INPUT_REGION_DEFAULT, STATIC_INPUT_REGION_ENV,
+        is_kde_desktop_value, is_trusted_media_origin, pointer_input_rectangles,
+        static_input_region_diagnostic, InputRectangle, INPUT_SENTINEL,
+        STATIC_INPUT_REGION_DEFAULT, STATIC_INPUT_REGION_ENV,
     };
+
+    #[test]
+    fn recognizes_kde_and_plasma_desktop_identifiers() {
+        for value in [
+            "KDE",
+            "KDE:Plasma",
+            "plasma",
+            "plasmawayland",
+            "/usr/share/xsessions/plasma",
+        ] {
+            assert!(is_kde_desktop_value(value), "{value}");
+        }
+
+        for value in ["GNOME", "ubuntu:GNOME", "X-Cinnamon", "XFCE", ""] {
+            assert!(!is_kde_desktop_value(value), "{value}");
+        }
+    }
 
     #[test]
     fn allows_media_only_from_the_local_backend_origin() {

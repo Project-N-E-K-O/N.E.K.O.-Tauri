@@ -4958,6 +4958,22 @@ class LLMSessionManager:
         # 在锁外检查是否需要创建新session（不要在锁内创建session，避免死锁）
         if not self.session_ready and self._starting_session_count == 0:
             if not self.session or not self.is_active:
+                # 音频 / 屏幕 / 摄像头都是持续流，只负责给已经存在（或由前端
+                # 显式 start_session 正在创建）的会话供数，不能把单个媒体帧
+                # 当成“用户要求启动会话”。
+                #
+                # API session 异常断开时，前端会停止录音并延迟发送一次
+                # start_session。屏幕采集可能在这段窗口内继续产生帧；旧逻辑把
+                # screen/camera/audio 都映射为 audio 并立即自动建连，抢在前端
+                # 恢复流程之前启动，且 cleanup 已清空 self.websocket，最终得到
+                # 一个无法向 UI 回传的孤儿会话。媒体流在这里直接丢弃，恢复入口
+                # 统一收口到显式 start_session；文本保留旧的兼容性自动启动。
+                if input_type != 'text':
+                    logger.debug(
+                        "Session未就绪，丢弃 %s 流数据并等待显式 start_session",
+                        input_type,
+                    )
+                    return
                 # Memory Server 专属冷却检查
                 if self._emit_cooldown_turn_end_if_needed():
                     return
@@ -4966,9 +4982,7 @@ class LLMSessionManager:
                 if self._session_start_circuit_open:
                     return
                 logger.info(f"Session未就绪且不存在，根据输入类型 {input_type} 自动创建 session")
-                # 根据输入类型确定模式
-                mode = 'text' if input_type == 'text' else 'audio'
-                await self.start_session(self.websocket, new=False, input_mode=mode)
+                await self.start_session(self.websocket, new=False, input_mode='text')
 
                 # 检查启动是否成功
                 if not self.session or not self.is_active:
@@ -4996,6 +5010,14 @@ class LLMSessionManager:
 
         # 如果 session 不存在或不活跃，检查是否可以自动重建
         if not self.session or not self.is_active:
+            # 与 _stream_data_now 的入口规则保持对偶：持续媒体帧不得自行
+            # 创建会话。这个二次守卫覆盖直接调用本方法、flush 及竞态窗口。
+            if input_type != 'text':
+                logger.debug(
+                    "Session不存在或未激活，丢弃 %s 流数据并等待显式 start_session",
+                    input_type,
+                )
+                return
             # Memory Server 专属冷却检查
             if self._emit_cooldown_turn_end_if_needed():
                 return
@@ -5024,9 +5046,7 @@ class LLMSessionManager:
                 self.sync_message_queue.put({'type': 'system', 'data': 'websocket disconnected'})
                 return
             
-            # 根据输入类型确定模式
-            mode = 'text' if input_type == 'text' else 'audio'
-            await self.start_session(self.websocket, new=False, input_mode=mode)
+            await self.start_session(self.websocket, new=False, input_mode='text')
             
             # 检查启动是否成功
             if not self.session or not self.is_active:

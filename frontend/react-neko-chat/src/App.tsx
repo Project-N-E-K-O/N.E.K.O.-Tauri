@@ -118,6 +118,19 @@ function getToolItemLabel(item: ToolIconItem): string {
   return i18n(item.labelKey, item.labelFallback);
 }
 
+function hasSingleInsertedLineBreak(previousValue: string, currentValue: string): boolean {
+  if (currentValue.length !== previousValue.length + 1) return false;
+
+  for (let index = 0; index < currentValue.length; index += 1) {
+    if (currentValue[index] !== '\n') continue;
+    if (currentValue.slice(0, index) + currentValue.slice(index + 1) === previousValue) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 const avatarToolRangePadding = 100;
 const avatarToolRangeHoldMs = 180;
 const compactCursorZoneSelector = [
@@ -674,6 +687,8 @@ export default function App({
   const composerEnterCycleActiveRef = useRef(false);
   const composerEnterCycleImeRef = useRef(false);
   const composerEnterCycleShiftRef = useRef(false);
+  const composerEnterCycleLineBreakRef = useRef(false);
+  const composerEnterCycleDraftRef = useRef('');
   const lastRollbackKeyRef = useRef('');
   const lastToolCursorResetKeyRef = useRef('');
   const canSubmit = !composerDisabled && (draft.trim().length > 0 || composerAttachments.length > 0);
@@ -1536,10 +1551,10 @@ export default function App({
     clearGlobalToolCursorState();
   }, []);
 
-  function submitDraft() {
+  function submitDraft(draftOverride?: string) {
     if (composerDisabled) return;
     if (submittingRef.current) return;
-    const text = draft.trim();
+    const text = (draftOverride ?? draft).trim();
     if (!text && composerAttachments.length === 0) return;
     submittingRef.current = true;
     try {
@@ -1878,13 +1893,47 @@ export default function App({
                 onChange={(event) => {
                   setDraft(event.target.value);
                 }}
-                onInput={() => {
+                onInput={(event) => {
                   // Some macOS Chinese IMEs commit an ASCII candidate (for
                   // example "ok") without composition events or keyCode 229.
-                  // They still emit an input event between Enter keydown and
-                  // keyup. A normal send Enter does not mutate the textarea
-                  // because its line-break beforeinput is prevented below.
-                  if (composerEnterCycleActiveRef.current) {
+                  // Classify the input mutation instead of treating every
+                  // mutation as IME: WebKit can still insert a line break when
+                  // beforeinput prevention does not take effect.
+                  if (!composerEnterCycleActiveRef.current) return;
+
+                  const inputEvent = event.nativeEvent as InputEvent;
+                  const inputType = inputEvent.inputType;
+                  const isLineBreak = inputType === 'insertLineBreak'
+                    || inputType === 'insertParagraph';
+
+                  if (isLineBreak) {
+                    if (!composerEnterCycleShiftRef.current) {
+                      composerEnterCycleLineBreakRef.current = true;
+                    }
+                    return;
+                  }
+
+                  if (inputEvent.isComposing
+                    || inputType === 'insertCompositionText'
+                    || inputType === 'insertText'
+                    || inputType === 'insertReplacementText'
+                    || composerImeCommitPendingRef.current) {
+                    composerEnterCycleImeRef.current = true;
+                    return;
+                  }
+
+                  // Older WebKit builds may omit inputType. Distinguish a
+                  // single inserted newline from a candidate-text mutation.
+                  const previousValue = composerEnterCycleDraftRef.current;
+                  const currentValue = event.currentTarget.value;
+                  const insertedOnlyOneLineBreak = hasSingleInsertedLineBreak(
+                    previousValue,
+                    currentValue,
+                  );
+
+                  if (insertedOnlyOneLineBreak && !composerEnterCycleShiftRef.current) {
+                    composerEnterCycleLineBreakRef.current = true;
+                  } else if (currentValue !== previousValue) {
                     composerEnterCycleImeRef.current = true;
                   }
                 }}
@@ -1913,6 +1962,7 @@ export default function App({
                   if ((inputEvent.inputType === 'insertLineBreak'
                     || inputEvent.inputType === 'insertParagraph')
                     && !composerEnterCycleShiftRef.current) {
+                    composerEnterCycleLineBreakRef.current = true;
                     // A real Enter outside IME means "send". Prevent the
                     // textarea newline now; the message is sent on keyup.
                     event.preventDefault();
@@ -1929,6 +1979,8 @@ export default function App({
                     composerEnterCycleActiveRef.current = true;
                     composerEnterCycleShiftRef.current = event.shiftKey;
                     composerEnterCycleImeRef.current = isImeEnter;
+                    composerEnterCycleLineBreakRef.current = false;
+                    composerEnterCycleDraftRef.current = event.currentTarget.value;
                   }
                 }}
                 onKeyUp={(event) => {
@@ -1944,15 +1996,24 @@ export default function App({
                     && !composerEnterCycleImeRef.current
                     && !composerIsComposingRef.current
                     && !composerImeCommitPendingRef.current;
+                  const draftBeforeEnter = composerEnterCycleDraftRef.current;
+                  const shouldRestoreDraft = composerEnterCycleLineBreakRef.current
+                    && !composerEnterCycleShiftRef.current;
 
                   composerEnterCycleActiveRef.current = false;
                   composerEnterCycleShiftRef.current = false;
                   composerEnterCycleImeRef.current = false;
+                  composerEnterCycleLineBreakRef.current = false;
+                  composerEnterCycleDraftRef.current = '';
                   composerImeCommitPendingRef.current = false;
+
+                  if (shouldRestoreDraft) {
+                    setDraft(draftBeforeEnter);
+                  }
 
                   if (shouldSubmit) {
                     event.preventDefault();
-                    submitDraft();
+                    submitDraft(shouldRestoreDraft ? draftBeforeEnter : undefined);
                   }
                 }}
                 onPointerUp={() => {
@@ -1967,6 +2028,8 @@ export default function App({
                   composerEnterCycleActiveRef.current = false;
                   composerEnterCycleImeRef.current = false;
                   composerEnterCycleShiftRef.current = false;
+                  composerEnterCycleLineBreakRef.current = false;
+                  composerEnterCycleDraftRef.current = '';
                 }}
               />
               {galgameModeEnabled && !choicePromptHasOptions ? (

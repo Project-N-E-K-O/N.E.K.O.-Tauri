@@ -84,6 +84,56 @@ describe('App', () => {
     expect(onComposerSubmit).toHaveBeenCalledWith({ text: 'Test send' });
   });
 
+  it('submits plain Enter when WebKit inserts a line break before keyup', () => {
+    const onComposerSubmit = vi.fn();
+    render(<App onComposerSubmit={onComposerSubmit} />);
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.change(input, { target: { value: 'Send without newline' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.input(input, {
+      target: { value: 'Send without\nnewline' },
+      inputType: 'insertLineBreak',
+    });
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' });
+
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: 'Send without newline' });
+    expect(input).toHaveValue('');
+  });
+
+  it('restores a multiline draft when WebKit omits the line-break inputType', () => {
+    const onComposerSubmit = vi.fn();
+    render(<App onComposerSubmit={onComposerSubmit} />);
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.change(input, { target: { value: 'First line\nSecond line' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.input(input, {
+      target: { value: 'First line\n\nSecond line' },
+    });
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' });
+
+    expect(onComposerSubmit).toHaveBeenCalledWith({ text: 'First line\nSecond line' });
+    expect(input).toHaveValue('');
+  });
+
+  it('keeps a Shift+Enter line break without submitting', () => {
+    const onComposerSubmit = vi.fn();
+    render(<App onComposerSubmit={onComposerSubmit} />);
+
+    const input = screen.getByPlaceholderText('Type a message...');
+    fireEvent.change(input, { target: { value: 'First line' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', shiftKey: true });
+    fireEvent.input(input, {
+      target: { value: 'First line\n' },
+      inputType: 'insertLineBreak',
+    });
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter', shiftKey: true });
+
+    expect(onComposerSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue('First line\n');
+  });
+
   it('uses the first Enter to confirm active IME text and the second Enter to submit', () => {
     const onComposerSubmit = vi.fn();
     render(<App onComposerSubmit={onComposerSubmit} />);

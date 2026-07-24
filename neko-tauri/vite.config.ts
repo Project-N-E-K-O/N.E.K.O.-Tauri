@@ -16,7 +16,8 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // Keep the default in sync with tauri.conf.json; localhost may resolve to ::1 on macOS.
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",

@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "build:chat": "npm --prefix ../frontend/react-neko-chat run build",
+    "predev": "npm run build:chat",
     "dev": "vite",
+    "prebuild": "npm run build:chat",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "node scripts/run-tauri.mjs",

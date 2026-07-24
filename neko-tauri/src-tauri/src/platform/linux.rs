@@ -57,7 +57,7 @@ pub(crate) fn prepare_process_environment() {
     std::env::set_var("GDK_BACKEND", "x11");
 }
 
-pub(crate) fn configure_app(_app: &tauri::App) {}
+pub(crate) fn configure_app(_app: &mut tauri::App) {}
 
 fn is_kde_desktop_value(value: &str) -> bool {
     value

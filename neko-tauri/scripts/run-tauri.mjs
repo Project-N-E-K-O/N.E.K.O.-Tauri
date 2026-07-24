@@ -1,7 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { ensureLoopbackNoProxy } from "./proxy-env.mjs";
+
 const env = { ...process.env };
+
+// The Tauri window first loads Vite and then navigates to the local Python
+// backend. Keep loopback traffic out of user-configured proxies; otherwise a
+// transparent window can silently display an empty proxy error response.
+ensureLoopbackNoProxy(env);
 
 // Tao cannot read the global cursor position on native Wayland. The desktop-pet
 // hit test needs that position even while the transparent window ignores input,

@@ -31,4 +31,5 @@ objc = "0.2"
 gdk = "0.18"
 gdkx11 = "0.18"
 gtk = "0.18"
+webkit2gtk = "2"
 x11 = { version = "2.21", features = ["xlib"] }

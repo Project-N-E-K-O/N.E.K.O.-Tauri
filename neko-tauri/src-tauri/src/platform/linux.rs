@@ -3,6 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gtk::prelude::*;
 use tauri::Manager;
+use webkit2gtk::{
+    DeviceInfoPermissionRequest, PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
+    WebViewExt,
+};
 
 use super::CursorSample;
 
@@ -25,6 +29,7 @@ const INPUT_SENTINEL: InputRectangle = InputRectangle {
 };
 const POINTER_HOT_ZONE_SIZE: i32 = 192;
 const DRAG_HOT_ZONE_SIZE: i32 = 768;
+const BACKEND_MEDIA_PORT: u16 = 48911;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InputRectangle {
@@ -54,10 +59,76 @@ pub(crate) fn prepare_process_environment() {
 
 pub(crate) fn configure_app(_app: &tauri::App) {}
 
+fn is_trusted_media_origin(uri: &str) -> bool {
+    let Ok(url) = tauri::Url::parse(uri) else {
+        return false;
+    };
+
+    url.scheme() == "http"
+        && matches!(
+            url.host_str(),
+            Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+        )
+        && url.port_or_known_default() == Some(BACKEND_MEDIA_PORT)
+}
+
+fn configure_media_permissions(window: &tauri::WebviewWindow) -> Result<(), String> {
+    window
+        .with_webview(|platform_webview| {
+            let webview = platform_webview.inner();
+
+            if let Some(settings) = WebViewExt::settings(&webview) {
+                settings.set_enable_media_stream(true);
+                settings.set_enable_webrtc(true);
+            }
+
+            webview.connect_permission_request(|webview, request| {
+                let is_media_request = request
+                    .dynamic_cast_ref::<UserMediaPermissionRequest>()
+                    .is_some()
+                    || request
+                        .dynamic_cast_ref::<DeviceInfoPermissionRequest>()
+                        .is_some();
+
+                if !is_media_request {
+                    // Leave unrelated permissions to WebKitGTK's default policy.
+                    return false;
+                }
+
+                let uri = webview.uri().unwrap_or_default();
+                let trusted = is_trusted_media_origin(uri.as_str());
+                let origin = tauri::Url::parse(uri.as_str())
+                    .ok()
+                    .and_then(|url| {
+                        let host = url.host_str()?.to_string();
+                        Some(format!(
+                            "{}://{}:{}",
+                            url.scheme(),
+                            host,
+                            url.port_or_known_default().unwrap_or_default()
+                        ))
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                if trusted {
+                    request.allow();
+                    println!("[MediaPermission] 已允许本地 N.E.K.O 媒体请求: origin={origin}");
+                } else {
+                    request.deny();
+                    println!("[MediaPermission] 已拒绝非可信媒体请求: origin={origin}");
+                }
+
+                true
+            });
+        })
+        .map_err(|error| format!("无法配置 Linux WebView 媒体权限: {error}"))
+}
+
 pub(crate) fn configure_main_window(
     _app: &tauri::App,
     window: &tauri::WebviewWindow,
 ) -> Result<(), String> {
+    configure_media_permissions(window)?;
     configure_overlay(window)?;
     resize_to_virtual_desktop(window)?;
     window
@@ -478,18 +549,33 @@ pub(crate) fn open_settings_window(
         builder
     };
 
-    builder
-        .build()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    let window = builder.build().map_err(|error| error.to_string())?;
+    configure_media_permissions(&window)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        pointer_input_rectangles, static_input_region_diagnostic, InputRectangle, INPUT_SENTINEL,
-        STATIC_INPUT_REGION_DEFAULT, STATIC_INPUT_REGION_ENV,
+        is_trusted_media_origin, pointer_input_rectangles, static_input_region_diagnostic,
+        InputRectangle, INPUT_SENTINEL, STATIC_INPUT_REGION_DEFAULT, STATIC_INPUT_REGION_ENV,
     };
+
+    #[test]
+    fn allows_media_only_from_the_local_backend_origin() {
+        assert!(is_trusted_media_origin("http://127.0.0.1:48911/"));
+        assert!(is_trusted_media_origin(
+            "http://localhost:48911/settings?tab=microphone"
+        ));
+        assert!(is_trusted_media_origin("http://[::1]:48911/"));
+
+        assert!(!is_trusted_media_origin("http://127.0.0.1:1420/"));
+        assert!(!is_trusted_media_origin("https://127.0.0.1:48911/"));
+        assert!(!is_trusted_media_origin("http://example.com:48911/"));
+        assert!(!is_trusted_media_origin(
+            "http://127.0.0.1.evil.example:48911/"
+        ));
+        assert!(!is_trusted_media_origin("not a url"));
+    }
 
     #[test]
     fn parses_static_input_region_diagnostic_configuration() {

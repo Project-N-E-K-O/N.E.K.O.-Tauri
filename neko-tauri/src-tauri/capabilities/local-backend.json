@@ -11,6 +11,9 @@
   "permissions": [
     "core:event:default",
     "allow-set-click-through",
-    "allow-open-new-window"
+    "allow-open-new-window",
+    "allow-get-screen-capture-capabilities",
+    "allow-get-screen-capture-sources",
+    "allow-capture-screen-source"
   ]
 }

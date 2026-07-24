@@ -5,7 +5,6 @@ use std::time::Duration;
 use cocoa::base::{id, nil, NO, YES};
 use cocoa::foundation::{NSPoint, NSRect, NSSize};
 use objc::{class, msg_send, sel, sel_impl};
-use tauri::Manager;
 
 use super::CursorSample;
 
@@ -74,7 +73,7 @@ unsafe fn apply_primary_screen_frame(ns_window: id) {
 
 pub(crate) fn prepare_process_environment() {}
 
-pub(crate) fn configure_app(app: &tauri::App) {
+pub(crate) fn configure_app(app: &mut tauri::App) {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 }
 

@@ -4,7 +4,7 @@ pub(crate) const INJECT_CLICK_THROUGH_BRIDGE: bool = true;
 
 pub(crate) fn prepare_process_environment() {}
 
-pub(crate) fn configure_app(_app: &tauri::App) {}
+pub(crate) fn configure_app(_app: &mut tauri::App) {}
 
 pub(crate) fn configure_main_window(
     _app: &tauri::App,

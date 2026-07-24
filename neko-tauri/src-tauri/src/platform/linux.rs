@@ -52,7 +52,7 @@ pub(crate) fn prepare_process_environment() {
     std::env::set_var("GDK_BACKEND", "x11");
 }
 
-pub(crate) fn configure_app(_app: &tauri::App) {}
+pub(crate) fn configure_app(_app: &mut tauri::App) {}
 
 pub(crate) fn configure_main_window(
     _app: &tauri::App,

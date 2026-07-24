@@ -10,6 +10,24 @@ fn is_backend_page(url: &tauri::Url) -> bool {
         && url.port_or_known_default() == Some(48911)
 }
 
+fn should_reveal_main_window(label: &str, event: PageLoadEvent) -> bool {
+    label == "main" && event == PageLoadEvent::Finished
+}
+
+fn reveal_main_window(window: &tauri::Window, url: &tauri::Url) {
+    match window.is_visible() {
+        Ok(true) => {}
+        Ok(false) => match window.show() {
+            Ok(()) => println!(
+                "[WindowVisibility] 主窗口首个页面已完成，现已显示: backend={}",
+                is_backend_page(url)
+            ),
+            Err(error) => eprintln!("主窗口页面已完成，但显示窗口失败: {error}"),
+        },
+        Err(error) => eprintln!("无法读取主窗口可见状态: {error}"),
+    }
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -68,15 +86,21 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .on_page_load(|webview, payload| {
-            if platform::INJECT_CLICK_THROUGH_BRIDGE
-                && webview.label() == "main"
-                && payload.event() == PageLoadEvent::Finished
-                && is_backend_page(payload.url())
-            {
+            if !should_reveal_main_window(webview.label(), payload.event()) {
+                return;
+            }
+
+            if platform::INJECT_CLICK_THROUGH_BRIDGE && is_backend_page(payload.url()) {
                 if let Err(error) = webview.eval(include_str!("click_through.js")) {
                     eprintln!("注入 Tauri 鼠标命中桥接失败: {error}");
                 }
             }
+
+            // The main window is created hidden. This prevents KWin from
+            // presenting WebKitGTK's unpainted fullscreen surface as a black
+            // rectangle. Reveal only after the startup document has finished
+            // loading; a finished backend page is also a safe fallback.
+            reveal_main_window(&webview.window(), payload.url());
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -112,7 +136,8 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::is_backend_page;
+    use super::{is_backend_page, should_reveal_main_window};
+    use tauri::webview::PageLoadEvent;
 
     #[test]
     fn injects_native_hit_test_only_into_the_backend_page() {
@@ -125,5 +150,15 @@ mod tests {
         assert!(is_backend_page(&backend_localhost));
         assert!(!is_backend_page(&vite_startup));
         assert!(!is_backend_page(&unrelated));
+    }
+
+    #[test]
+    fn reveals_only_the_finished_main_window() {
+        assert!(should_reveal_main_window("main", PageLoadEvent::Finished));
+        assert!(!should_reveal_main_window("main", PageLoadEvent::Started));
+        assert!(!should_reveal_main_window(
+            "settings",
+            PageLoadEvent::Finished
+        ));
     }
 }

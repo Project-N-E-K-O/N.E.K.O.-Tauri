@@ -475,6 +475,13 @@ fn apply_input_rectangles(
 
 pub(crate) fn startup_input_region(window: &tauri::WebviewWindow) -> Result<(), String> {
     let gtk_window = window.gtk_window().map_err(|error| error.to_string())?;
+    if !gtk_window.is_realized() {
+        // The main window is intentionally created hidden so KWin never
+        // presents WebKitGTK's unpainted fullscreen surface. Realizing creates
+        // the backing GDK window needed by XShape without mapping it onscreen.
+        gtk_window.realize();
+        println!("[WindowVisibility] Linux 隐藏主窗口已完成 GTK realize");
+    }
     if let Some(rectangle) = static_input_region_diagnostic() {
         let actual = apply_static_input_region(&gtk_window, rectangle)?;
         println!(

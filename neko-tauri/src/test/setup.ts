@@ -1,4 +1,18 @@
 import '@testing-library/jest-dom/vitest';
+import { vi } from 'vitest';
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async () => () => undefined),
+}));
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(async () => undefined),
+}));
+
+Object.defineProperty(HTMLMediaElement.prototype, 'play', {
+  configurable: true,
+  value: vi.fn(async () => undefined),
+});
 
 if (!HTMLElement.prototype.scrollTo) {
   HTMLElement.prototype.scrollTo = function scrollTo(options?: ScrollToOptions | number, _y?: number) {

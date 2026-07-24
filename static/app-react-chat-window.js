@@ -675,14 +675,7 @@
         }
     }
 
-    function clampPosition(left, top) {
-        var shell = getShell();
-        if (!shell) {
-            return { left: left, top: top };
-        }
-
-        var rect = shell.getBoundingClientRect();
-        var width = rect.width || 960;
+    function clampPositionForSize(left, top, width) {
         var headerHeight = 52;
         var maxLeft = Math.max(0, window.innerWidth - width);
         var maxTop = Math.max(0, window.innerHeight - headerHeight);
@@ -691,6 +684,17 @@
             left: Math.max(0, Math.min(maxLeft, left)),
             top: Math.max(0, Math.min(maxTop, top))
         };
+    }
+
+    function clampPosition(left, top) {
+        var shell = getShell();
+        if (!shell) {
+            return { left: left, top: top };
+        }
+
+        var rect = shell.getBoundingClientRect();
+        var width = rect.width || 960;
+        return clampPositionForSize(left, top, width);
     }
 
     function applyPosition(left, top) {
@@ -2221,11 +2225,43 @@
             pointerOffsetY: clientY - rect.top,
             startClientX: clientX,
             startClientY: clientY,
+            baseLeft: rect.left,
+            baseTop: rect.top,
+            shellWidth: rect.width || 960,
+            currentLeft: rect.left,
+            currentTop: rect.top,
+            latestClientX: null,
+            latestClientY: null,
+            frameId: null,
             moved: false
         };
 
+        // 固定当前几何，后续仅通过 GPU 合成友好的 transform 移动；
+        // 松手时再一次性提交 left/top，避免每个 mousemove 都触发布局。
+        shell.style.left = rect.left + 'px';
+        shell.style.top = rect.top + 'px';
+        shell.style.transform = 'none';
         shell.classList.add('is-dragging');
         document.body.classList.add('react-chat-window-dragging');
+    }
+
+    function flushDragFrame() {
+        if (!dragState) return;
+        dragState.frameId = null;
+        if (dragState.latestClientX === null || dragState.latestClientY === null) return;
+
+        var shell = getShell();
+        if (!shell) return;
+
+        var left = dragState.latestClientX - dragState.pointerOffsetX;
+        var top = dragState.latestClientY - dragState.pointerOffsetY;
+        var clamped = clampPositionForSize(left, top, dragState.shellWidth);
+
+        dragState.currentLeft = clamped.left;
+        dragState.currentTop = clamped.top;
+        shell.style.transform = 'translate3d('
+            + (clamped.left - dragState.baseLeft) + 'px, '
+            + (clamped.top - dragState.baseTop) + 'px, 0)';
     }
 
     function updateDrag(clientX, clientY) {
@@ -2242,10 +2278,11 @@
             dragState.moved = true;
         }
 
-        var left = clientX - dragState.pointerOffsetX;
-        var top = clientY - dragState.pointerOffsetY;
-        var clamped = clampPosition(left, top);
-        applyPosition(clamped.left, clamped.top);
+        dragState.latestClientX = clientX;
+        dragState.latestClientY = clientY;
+        if (dragState.frameId === null) {
+            dragState.frameId = window.requestAnimationFrame(flushDragFrame);
+        }
     }
 
     function stopDrag(options) {
@@ -2253,17 +2290,27 @@
         var opts = options || {};
         var changedTouch = opts.changedTouches && opts.changedTouches.length > 0 ? opts.changedTouches[0] : null;
 
+        if (dragState.frameId !== null) {
+            window.cancelAnimationFrame(dragState.frameId);
+            dragState.frameId = null;
+            flushDragFrame();
+        }
+
         var wasMoved = dragState.moved;
+        var finalLeft = dragState.currentLeft;
+        var finalTop = dragState.currentTop;
 
         var shell = getShell();
         if (shell) {
             shell.classList.remove('is-dragging');
-            var rect = shell.getBoundingClientRect();
+            shell.style.left = finalLeft + 'px';
+            shell.style.top = finalTop + 'px';
+            shell.style.transform = 'none';
             // 最小化态下不持久化悬浮球坐标到展开态存储，
             // 否则 restorePosition 会把完整窗口放到悬浮球位置
             // 移动端坐标也不持久化，避免污染桌面端保存的位置
             if (!minimized && !isMobileWidth()) {
-                persistPosition(rect.left, rect.top);
+                persistPosition(finalLeft, finalTop);
             }
         }
 

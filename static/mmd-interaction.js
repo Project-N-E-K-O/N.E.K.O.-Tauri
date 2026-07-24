@@ -25,6 +25,8 @@ class MMDInteraction {
         this.dragHandler = null;
         this.wheelHandler = null;
         this.mouseHoverHandler = null;
+        this._dragFrameId = null;
+        this._pendingDragPosition = null;
 
         // 射线检测
         this._raycaster = THREE ? new THREE.Raycaster() : null;
@@ -185,6 +187,70 @@ class MMDInteraction {
 
         this.cleanupDragAndZoom();
 
+        const cancelPendingDragMove = () => {
+            if (this._dragFrameId !== null) {
+                window.cancelAnimationFrame(this._dragFrameId);
+            }
+            this._dragFrameId = null;
+            this._pendingDragPosition = null;
+        };
+
+        const applyPendingDragMove = () => {
+            this._dragFrameId = null;
+            const position = this._pendingDragPosition;
+            this._pendingDragPosition = null;
+            if (!position || !this.isDragging || !this.manager.camera) return;
+
+            const dx = position.x - this.previousMousePosition.x;
+            const dy = position.y - this.previousMousePosition.y;
+            this.previousMousePosition = position;
+
+            if (this.dragMode === 'pan') {
+                const mesh = this.manager.currentModel?.mesh;
+                if (!mesh) return;
+
+                const camera = this.manager.camera;
+                const renderer = this.manager.renderer;
+                const cameraDistance = camera.position.distanceTo(mesh.position);
+                const fov = camera.fov * (Math.PI / 180);
+                const screenHeight = renderer.domElement.clientHeight;
+                const screenWidth = renderer.domElement.clientWidth;
+                const worldHeight = 2 * Math.tan(fov / 2) * cameraDistance;
+                const worldWidth = worldHeight * (screenWidth / screenHeight);
+                const pixelToWorldX = worldWidth / screenWidth;
+                const pixelToWorldY = worldHeight / screenHeight;
+                const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+
+                mesh.position.add(right.multiplyScalar(dx * pixelToWorldX));
+                mesh.position.add(up.multiplyScalar(-dy * pixelToWorldY));
+            } else if (this.dragMode === 'orbit') {
+                const mesh = this.manager.currentModel?.mesh;
+                if (!mesh || !this._orbitStartQuat || !this._orbitPivot) return;
+
+                const rotateSpeed = 0.005;
+                const totalDx = position.x - this._orbitStartMouse.x;
+                const totalDy = position.y - this._orbitStartMouse.y;
+                const yQuat = new THREE.Quaternion().setFromAxisAngle(
+                    new THREE.Vector3(0, 1, 0), totalDx * rotateSpeed);
+                const xQuat = new THREE.Quaternion().setFromAxisAngle(
+                    new THREE.Vector3(1, 0, 0), totalDy * rotateSpeed);
+                const totalQuat = new THREE.Quaternion().multiplyQuaternions(yQuat, xQuat);
+                const offset = new THREE.Vector3().subVectors(this._orbitStartPos, this._orbitPivot);
+                const rotatedOffset = offset.clone().applyQuaternion(totalQuat);
+
+                mesh.position.copy(this._orbitPivot).add(rotatedOffset);
+                mesh.quaternion.copy(this._orbitStartQuat).premultiply(totalQuat);
+            }
+        };
+
+        const flushPendingDragMove = () => {
+            if (this._dragFrameId !== null) {
+                window.cancelAnimationFrame(this._dragFrameId);
+            }
+            applyPendingDragMove();
+        };
+
         // 鼠标按下
         this.mouseDownHandler = (e) => {
             if (!this.manager._isModelReadyForInteraction) return;
@@ -197,6 +263,7 @@ class MMDInteraction {
                 this._isSnappingModel = false;
             }
 
+            cancelPendingDragMove();
             if (e.button === 0 || e.button === 1) { // 左键/中键 - 平移
                 if (!this._hitTestModel(e.clientX, e.clientY)) return;
 
@@ -234,6 +301,7 @@ class MMDInteraction {
         this.dragHandler = (e) => {
             if (isYuiGuideDragLocked()) {
                 if (this.isDragging) {
+                    cancelPendingDragMove();
                     this.isDragging = false;
                     this.dragMode = null;
                     canvas.style.cursor = 'default';
@@ -246,6 +314,7 @@ class MMDInteraction {
             // 【维护注意】拖动中外部可能触发 setLocked，此时 dragHandler 仍会被 mousemove 调用。
             //  必须在此检测并终止拖拽 + 恢复按钮事件，否则锁定后拖拽状态残留。
             if (this.checkLocked()) {
+                cancelPendingDragMove();
                 this.isDragging = false;
                 this.dragMode = null;
                 canvas.style.cursor = 'default';
@@ -253,63 +322,16 @@ class MMDInteraction {
                 return;
             }
 
-            const dx = e.clientX - this.previousMousePosition.x;
-            const dy = e.clientY - this.previousMousePosition.y;
-            this.previousMousePosition = { x: e.clientX, y: e.clientY };
-
-            if (this.dragMode === 'pan') {
-                // 像素精确平移模型（参考 VRM 风格，基于相机 FOV/距离）
-                const mesh = this.manager.currentModel?.mesh;
-                if (!mesh) return;
-
-                const camera = this.manager.camera;
-                const renderer = this.manager.renderer;
-
-                const cameraDistance = camera.position.distanceTo(mesh.position);
-                const fov = camera.fov * (Math.PI / 180);
-                const screenHeight = renderer.domElement.clientHeight;
-                const screenWidth = renderer.domElement.clientWidth;
-
-                const worldHeight = 2 * Math.tan(fov / 2) * cameraDistance;
-                const worldWidth = worldHeight * (screenWidth / screenHeight);
-
-                const pixelToWorldX = worldWidth / screenWidth;
-                const pixelToWorldY = worldHeight / screenHeight;
-
-                const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
-
-                mesh.position.add(right.multiplyScalar(dx * pixelToWorldX));
-                mesh.position.add(up.multiplyScalar(-dy * pixelToWorldY));
-            } else if (this.dragMode === 'orbit') {
-                // 模型绕身体中心旋转（Y轴+X轴）
-                const mesh = this.manager.currentModel?.mesh;
-                if (!mesh || !this._orbitStartQuat || !this._orbitPivot) return;
-
-                const rotateSpeed = 0.005;
-                const totalDx = e.clientX - this._orbitStartMouse.x;
-                const totalDy = e.clientY - this._orbitStartMouse.y;
-
-                // Y轴左右 + X轴上下
-                const yQuat = new THREE.Quaternion().setFromAxisAngle(
-                    new THREE.Vector3(0, 1, 0), totalDx * rotateSpeed);
-                const xQuat = new THREE.Quaternion().setFromAxisAngle(
-                    new THREE.Vector3(1, 0, 0), totalDy * rotateSpeed);
-                const totalQuat = new THREE.Quaternion();
-                totalQuat.multiplyQuaternions(yQuat, xQuat);
-
-                // 绕 bounding box 中心旋转：旋转后调整位置使中心点保持不动
-                const offset = new THREE.Vector3().subVectors(this._orbitStartPos, this._orbitPivot);
-                const rotatedOffset = offset.clone().applyQuaternion(totalQuat);
-                mesh.position.copy(this._orbitPivot).add(rotatedOffset);
-                // 从起始状态重新计算旋转（幂等）
-                mesh.quaternion.copy(this._orbitStartQuat).premultiply(totalQuat);
+            this._pendingDragPosition = { x: e.clientX, y: e.clientY };
+            if (this._dragFrameId === null) {
+                this._dragFrameId = window.requestAnimationFrame(applyPendingDragMove);
             }
         };
 
         // 鼠标抬起
         this.mouseUpHandler = async () => {
             if (this.isDragging) {
+                flushPendingDragMove();
                 // 保留本次拖拽类型再清状态，跨屏切换只对 pan 生效
                 // （orbit 是绕模型中心旋转朝向，不应触发多屏切换）
                 const wasPanDrag = this.dragMode === 'pan';
@@ -361,6 +383,11 @@ class MMDInteraction {
         let _lastHoverHitTestAt = 0;
         this.mouseHoverHandler = (e) => {
             if (this.isDragging) return;
+            if (document.body && (
+                document.body.classList.contains('neko-model-dragging')
+                || document.body.classList.contains('react-chat-window-dragging')
+                || document.body.classList.contains('react-chat-window-resizing')
+            )) return;
             if (this.checkLocked()) {
                 canvas.style.cursor = 'default';
                 return;
@@ -401,6 +428,12 @@ class MMDInteraction {
     // ═══════════════════ 清理 ═══════════════════
 
     cleanupDragAndZoom() {
+        if (this._dragFrameId !== null) {
+            window.cancelAnimationFrame(this._dragFrameId);
+            this._dragFrameId = null;
+        }
+        this._pendingDragPosition = null;
+
         // document 级监听器必须无条件移除，防止 renderer 已销毁时泄漏
         if (this.dragHandler) document.removeEventListener('mousemove', this.dragHandler);
         if (this.mouseUpHandler) document.removeEventListener('mouseup', this.mouseUpHandler);

@@ -336,60 +336,428 @@ class Live2DManager {
                 if (gl) {
                     window.addEventListener('contextmenu', e => e.preventDefault());
                     let lastIgnoreState = false;
+                    let lastLinuxRegionKey = null;
+                    let pendingRadarPayload = null;
+                    let radarFrameId = null;
+                    let pendingRadarStartedAt = null;
+                    let pendingRadarEventCount = 0;
+                    const hitSize = 9;
+                    const hitOffset = Math.floor(hitSize / 2);
+                    const hitPixels = new Uint8Array(hitSize * hitSize * 4);
+                    const radarGrid = [
+                        [0, 0],
+                        [-4, 0], [4, 0], [0, -4], [0, 4],
+                        [-8, 0], [8, 0], [0, -8], [0, 8],
+                        [-5, -5], [5, 5], [-5, 5], [5, -5]
+                    ];
+                    const isLinuxTauri = Boolean(
+                        window.__TAURI__
+                        && /(?:X11|Linux)/i.test(window.navigator.userAgent || '')
+                    );
+                    let persistentRegionCache = {
+                        expiresAt: 0,
+                        rects: []
+                    };
 
-                    if (window.__TAURI__ && window.__TAURI__.event) {
-                        window.__TAURI__.event.listen('neko_radar_tick', (e) => {
-                            const physX = Math.round(e.payload[0]);
-                            const physY = Math.round(e.payload[1]);
-                            const dpr = window.devicePixelRatio || 1;
+                    const collectPersistentInputRects = () => {
+                        if (!isLinuxTauri) return [];
+                        const now = performance.now();
+                        if (now < persistentRegionCache.expiresAt) {
+                            return persistentRegionCache.rects;
+                        }
 
-                            const cssX = Math.max(0, Math.min(physX / dpr, window.innerWidth - 1));
-                            const cssY = Math.max(0, Math.min(physY / dpr, window.innerHeight - 1));
+                        const rects = [];
+                        const pushRect = (left, top, width, height) => {
+                            if (![left, top, width, height].every(Number.isFinite)) return;
+                            if (width <= 0 || height <= 0) return;
+                            const clippedLeft = Math.max(0, left);
+                            const clippedTop = Math.max(0, top);
+                            const clippedRight = Math.min(window.innerWidth, left + width);
+                            const clippedBottom = Math.min(window.innerHeight, top + height);
+                            if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) return;
+                            rects.push([
+                                Math.round(clippedLeft * 10) / 10,
+                                Math.round(clippedTop * 10) / 10,
+                                Math.round((clippedRight - clippedLeft) * 10) / 10,
+                                Math.round((clippedBottom - clippedTop) * 10) / 10
+                            ]);
+                        };
+                        const pushElement = (element) => {
+                            if (!(element instanceof Element) || element.getClientRects().length === 0) return;
+                            const style = window.getComputedStyle(element);
+                            if (
+                                style.display === 'none'
+                                || style.visibility === 'hidden'
+                                || style.pointerEvents === 'none'
+                                || Number.parseFloat(style.opacity || '1') <= 0.01
+                            ) return;
+                            const rect = element.getBoundingClientRect();
+                            pushRect(rect.left, rect.top, rect.width, rect.height);
+                        };
+                        const pushEllipse = (left, top, width, height, widthScale = 1) => {
+                            if (![left, top, width, height].every(Number.isFinite)) return;
+                            if (width <= 0 || height <= 0) return;
+                            const stripCount = 14;
+                            const centerX = left + width / 2;
+                            const centerY = top + height / 2;
+                            const radiusX = width / 2 * widthScale;
+                            const radiusY = height / 2;
+                            const stripHeight = height / stripCount;
+                            for (let index = 0; index < stripCount; index += 1) {
+                                const normalizedY = -1 + (2 * (index + 0.5)) / stripCount;
+                                const halfWidth = radiusX * Math.sqrt(Math.max(0, 1 - normalizedY * normalizedY));
+                                pushRect(
+                                    centerX - halfWidth,
+                                    centerY - radiusY + index * stripHeight - 1,
+                                    halfWidth * 2,
+                                    stripHeight + 2
+                                );
+                            }
+                        };
 
-                            let isDOM = false;
-                            const grid = [
-                                [0, 0],
-                                [-4, 0], [4, 0], [0, -4], [0, 4],
-                                [-8, 0], [8, 0], [0, -8], [0, 8],
-                                [-5, -5], [5, 5], [-5, 5], [5, -5]
-                            ];
-                            for (const [dx, dy] of grid) {
-                                const targetX = Math.max(0, Math.min(cssX + dx, window.innerWidth - 1));
-                                const targetY = Math.max(0, Math.min(cssY + dy, window.innerHeight - 1));
-                                const el = document.elementFromPoint(targetX, targetY);
-                                if (el && el.tagName.toLowerCase() !== 'canvas' && el.id !== 'root' && el !== document.body && el !== document.documentElement) {
-                                    isDOM = true;
-                                    break;
+                        // UI 根容器保证聊天滚动区域可交互；通用控件选择器覆盖
+                        // 浮动按钮、设置弹窗和运行时动态插入的控件。
+                        const selectors = [
+                            '#react-chat-window-shell',
+                            '#subtitle-display.show',
+                            '#status-toast.show',
+                            '#chat-avatar-preview-popup.is-visible',
+                            '[id$="-floating-buttons"]',
+                            '[id$="-return-button-container"]',
+                            '[id$="-lock-icon"]',
+                            '[data-neko-sidepanel]',
+                            '[role="dialog"]',
+                            'button',
+                            'input',
+                            'textarea',
+                            'select',
+                            'a[href]',
+                            '[contenteditable="true"]'
+                        ].join(',');
+                        document.querySelectorAll(selectors).forEach(pushElement);
+
+                        // 模型使用多条水平矩形近似椭圆，而不是把全屏 canvas
+                        // 加入区域。鼠标落在椭圆之外的可见像素时，原有 alpha
+                        // 命中仍会补一个局部热区。
+                        const vrmBounds = window.vrmManager?.currentModel
+                            ? window.vrmManager?.interaction?._cachedScreenBounds
+                            : null;
+                        const mmdBounds = window.mmdManager?.currentModel
+                            ? window.mmdManager?.interaction?._cachedScreenBounds
+                            : null;
+                        if (vrmBounds) {
+                            pushEllipse(
+                                vrmBounds.minX,
+                                vrmBounds.minY,
+                                vrmBounds.maxX - vrmBounds.minX,
+                                vrmBounds.maxY - vrmBounds.minY,
+                                0.65
+                            );
+                        } else if (mmdBounds) {
+                            pushEllipse(
+                                mmdBounds.minX,
+                                mmdBounds.minY,
+                                mmdBounds.maxX - mmdBounds.minX,
+                                mmdBounds.maxY - mmdBounds.minY,
+                                0.65
+                            );
+                        } else if (
+                            this.currentModel
+                            && this.currentModel.visible !== false
+                            && typeof this.currentModel.getBounds === 'function'
+                        ) {
+                            try {
+                                const bounds = this.currentModel.getBounds();
+                                pushEllipse(bounds.x, bounds.y, bounds.width, bounds.height, 0.82);
+                            } catch (error) {
+                                console.warn('[ClickThrough] 无法读取 Live2D 模型边界:', error);
+                            }
+                        }
+
+                        // 防止异常页面生成无限多输入矩形。Cairo 会继续合并相交
+                        // 区域，因此正常 UI 通常远少于此上限。
+                        persistentRegionCache = {
+                            expiresAt: now + 80,
+                            rects: rects.slice(0, 128)
+                        };
+                        return persistentRegionCache.rects;
+                    };
+
+                    const updateClickThrough = (shouldIgnore, diagnostic = {}) => {
+                        const persistentRects = collectPersistentInputRects();
+                        diagnostic = {
+                            ...diagnostic,
+                            persistentRects
+                        };
+                        let linuxRegionKey = null;
+                        if (isLinuxTauri) {
+                            const physical = Array.isArray(diagnostic.physical)
+                                ? diagnostic.physical
+                                : null;
+                            const domRect = diagnostic.domHit && Array.isArray(diagnostic.domHit.rect)
+                                ? diagnostic.domHit.rect
+                                : null;
+
+                            const persistentKey = persistentRects
+                                .map(rect => rect.map(value => Math.round(value / 4)).join(','))
+                                .join(';');
+                            if (shouldIgnore) {
+                                linuxRegionKey = 'transparent';
+                            } else if (domRect) {
+                                // DOM 矩形不随鼠标在元素内部移动而改变，避免无意义地
+                                // 高频提交相同 ShapeInput。
+                                linuxRegionKey = `dom:${domRect.map(value => Math.round(value * 2) / 2).join(',')}`;
+                            } else if (physical) {
+                                // 模型热区宽 192 物理像素，移动 48 像素才更新；拖动
+                                // 热区更大，使用 96 像素网格即可连续覆盖快速移动。
+                                const gridSize = String(diagnostic.reason || '').startsWith('drag-active')
+                                    ? 96
+                                    : 48;
+                                linuxRegionKey = `pointer:${Math.floor(physical[0] / gridSize)},${Math.floor(physical[1] / gridSize)},${gridSize}`;
+                            } else {
+                                linuxRegionKey = 'interactive-without-position';
+                            }
+                            linuxRegionKey += `|persistent:${persistentKey}`;
+                        }
+
+                        if (
+                            shouldIgnore === lastIgnoreState
+                            && (!isLinuxTauri || linuxRegionKey === lastLinuxRegionKey)
+                        ) return;
+                        lastIgnoreState = shouldIgnore;
+                        lastLinuxRegionKey = linuxRegionKey;
+                        if (window.__TAURI__.core) {
+                            const {
+                                reason = 'unknown',
+                                ...diagnosticDetails
+                            } = diagnostic;
+                            const details = JSON.stringify({
+                                ...diagnosticDetails,
+                                path: window.location.pathname,
+                                focused: document.hasFocus(),
+                                visibility: document.visibilityState
+                            });
+
+                            window.__TAURI__.core.invoke('set_click_through', {
+                                ignore: shouldIgnore,
+                                reason,
+                                details
+                            })
+                                .then(() => {
+                                    console.info('[ClickThrough] 状态已更新', {
+                                        ignore: shouldIgnore,
+                                        reason,
+                                        ...diagnosticDetails
+                                    });
+                                })
+                                .catch(err => console.error("底层连线失败:", err));
+                        }
+                    };
+
+                    const getActiveInteractionClasses = () => {
+                        const body = document.body;
+                        if (!body) return [];
+
+                        return [
+                            'neko-model-dragging',
+                            'react-chat-window-dragging',
+                            'react-chat-window-resizing'
+                        ].filter(className => body.classList.contains(className));
+                    };
+
+                    const isInteractionDragActive = () => getActiveInteractionClasses().length > 0;
+
+                    const processRadarTick = () => {
+                        radarFrameId = null;
+                        const payload = pendingRadarPayload;
+                        const radarStartedAt = pendingRadarStartedAt;
+                        const radarEventCount = pendingRadarEventCount;
+                        pendingRadarPayload = null;
+                        pendingRadarStartedAt = null;
+                        pendingRadarEventCount = 0;
+                        if (!payload) return;
+
+                        const radarProcessedAt = performance.now();
+                        const radarQueueDelayMs = Number.isFinite(radarStartedAt)
+                            ? Math.max(0, radarProcessedAt - radarStartedAt)
+                            : 0;
+
+                        // 拖动/缩放期间鼠标已经从可交互区域按下。此时保持窗口可交互，
+                        // 避免同步 gl.readPixels 与模型渲染争用同一帧，也避免拖到透明
+                        // 区域时窗口突然穿透而丢失 pointerup。
+                        if (isInteractionDragActive()) {
+                            updateClickThrough(false, {
+                                reason: 'drag-active',
+                                dragClasses: getActiveInteractionClasses(),
+                                physical: payload.slice(0, 2).map(value => Math.round(value)),
+                                radar: {
+                                    queueDelayMs: Math.round(radarQueueDelayMs * 10) / 10,
+                                    coalescedEvents: radarEventCount
+                                }
+                            });
+                            return;
+                        }
+
+                        const physX = Math.round(payload[0]);
+                        const physY = Math.round(payload[1]);
+                        const dpr = window.devicePixelRatio || 1;
+
+                        const cssX = Math.max(0, Math.min(physX / dpr, window.innerWidth - 1));
+                        const cssY = Math.max(0, Math.min(physY / dpr, window.innerHeight - 1));
+
+                        let isDOM = false;
+                        let domHit = null;
+                        for (const [dx, dy] of radarGrid) {
+                            const targetX = Math.max(0, Math.min(cssX + dx, window.innerWidth - 1));
+                            const targetY = Math.max(0, Math.min(cssY + dy, window.innerHeight - 1));
+                            const el = document.elementFromPoint(targetX, targetY);
+                            if (el && el.tagName.toLowerCase() !== 'canvas' && el.id !== 'root' && el !== document.body && el !== document.documentElement) {
+                                isDOM = true;
+                                const rect = el.getBoundingClientRect();
+                                domHit = {
+                                    tag: el.tagName.toLowerCase(),
+                                    id: (el.id || '').slice(0, 100),
+                                    classes: Array.from(el.classList || []).slice(0, 8),
+                                    rect: [
+                                        Math.round(rect.left * 10) / 10,
+                                        Math.round(rect.top * 10) / 10,
+                                        Math.round(rect.width * 10) / 10,
+                                        Math.round(rect.height * 10) / 10
+                                    ],
+                                    sampleOffset: [dx, dy],
+                                    samplePoint: [
+                                        Math.round(targetX * 10) / 10,
+                                        Math.round(targetY * 10) / 10
+                                    ]
+                                };
+                                break;
+                            }
+                        }
+
+                        let isLive2D = false;
+                        let live2dHitAreas = [];
+                        let nonZeroAlphaPixels = 0;
+                        let maxAlpha = 0;
+                        // Live2D 模型自带的命中区域只做“快速肯定”：命中时可直接
+                        // 恢复交互，避免同步读取 GPU；未命中仍回退到像素检测，因为
+                        // 有些模型的可见部分并未配置完整的 HitArea。
+                        if (!isDOM) {
+                            const model = this.currentModel;
+                            const modelAlpha = Number(model && (model.worldAlpha ?? model.alpha ?? 1));
+                            if (
+                                model
+                                && model.visible !== false
+                                && (!Number.isFinite(modelAlpha) || modelAlpha > 0.01)
+                                && typeof model.hitTest === 'function'
+                            ) {
+                                try {
+                                    const hitAreas = model.hitTest(cssX, cssY);
+                                    if (Array.isArray(hitAreas) && hitAreas.length > 0) {
+                                        live2dHitAreas = hitAreas.slice(0, 8);
+                                        isLive2D = true;
+                                    }
+                                } catch (error) {
+                                    console.warn('[ClickThrough] Live2D HitArea 检测失败，回退到像素检测:', error);
                                 }
                             }
+                        }
 
-                            const hitSize = 9;
-                            const offset = Math.floor(hitSize / 2);
-                            const startX = physX - offset;
-                            const startY = (gl.drawingBufferHeight - physY) - offset;
-
-                            let isLive2D = false;
+                        // DOM/HitArea 已命中时窗口必然需要交互，无需再同步读取 GPU 像素。
+                        if (!isDOM && !isLive2D) {
+                            const startX = physX - hitOffset;
+                            const startY = (gl.drawingBufferHeight - physY) - hitOffset;
                             if (startX >= 0 && startY >= 0 && startX + hitSize <= gl.drawingBufferWidth && startY + hitSize <= gl.drawingBufferHeight) {
-                                const pixels = new Uint8Array(hitSize * hitSize * 4);
-                                gl.readPixels(startX, startY, hitSize, hitSize, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                                hitPixels.fill(0);
+                                gl.readPixels(startX, startY, hitSize, hitSize, gl.RGBA, gl.UNSIGNED_BYTE, hitPixels);
 
-                                for (let i = 3; i < pixels.length; i += 4) {
-                                    if (pixels[i] > 0) {
-                                        isLive2D = true;
-                                        break;
+                                for (let i = 3; i < hitPixels.length; i += 4) {
+                                    const alpha = hitPixels[i];
+                                    if (alpha > 0) {
+                                        nonZeroAlphaPixels += 1;
+                                        maxAlpha = Math.max(maxAlpha, alpha);
                                     }
                                 }
+                                isLive2D = nonZeroAlphaPixels > 0;
                             }
+                        }
 
-                            const shouldIgnore = !(isDOM || isLive2D);
+                        updateClickThrough(!(isDOM || isLive2D), {
+                            reason: isDOM
+                                ? 'dom-hit'
+                                : (isLive2D
+                                    ? (live2dHitAreas.length > 0 ? 'live2d-hit-area' : 'live2d-alpha')
+                                    : 'transparent'),
+                            physical: [physX, physY],
+                            css: [
+                                Math.round(cssX * 10) / 10,
+                                Math.round(cssY * 10) / 10
+                            ],
+                            dpr,
+                            domHit,
+                            live2d: {
+                                hitAreas: live2dHitAreas,
+                                sampleSize: hitSize,
+                                nonZeroAlphaPixels,
+                                maxAlpha,
+                                rendererResolution: this.pixi_app.renderer.resolution || 1,
+                                drawingBuffer: [
+                                    gl.drawingBufferWidth,
+                                    gl.drawingBufferHeight
+                                ]
+                            },
+                            radar: {
+                                queueDelayMs: Math.round(radarQueueDelayMs * 10) / 10,
+                                coalescedEvents: radarEventCount
+                            }
+                        });
+                    };
 
-                            if (shouldIgnore !== lastIgnoreState) {
-                                lastIgnoreState = shouldIgnore;
-                                if (window.__TAURI__.core) {
-                                    window.__TAURI__.core.invoke('set_click_through', { ignore: shouldIgnore })
-                                        .catch(err => console.error("底层连线失败:", err));
+                    // Linux uses the detailed XShape payload produced here.
+                    // macOS and Windows install src-tauri/click_through.js as
+                    // their single hit-test owner, so they must not register a
+                    // second radar listener from the Live2D renderer.
+                    if (isLinuxTauri && window.__TAURI__ && window.__TAURI__.event) {
+                        window.__TAURI__.event.listen('neko_radar_tick', (e) => {
+                            // 拖动时不再把雷达任务塞进动画帧队列。拖动结束后的下一次
+                            // tick 会自动恢复判定，因此不会改变透明区域的最终穿透状态。
+                            if (isInteractionDragActive()) {
+                                pendingRadarPayload = null;
+                                pendingRadarStartedAt = null;
+                                pendingRadarEventCount = 0;
+                                if (radarFrameId !== null) {
+                                    window.cancelAnimationFrame(radarFrameId);
+                                    radarFrameId = null;
                                 }
+                                updateClickThrough(false, {
+                                    reason: 'drag-active-listener',
+                                    dragClasses: getActiveInteractionClasses(),
+                                    physical: Array.isArray(e.payload)
+                                        ? e.payload.slice(0, 2).map(value => Math.round(value))
+                                        : null
+                                });
+                                return;
                             }
+
+                            pendingRadarPayload = e.payload;
+                            pendingRadarEventCount += 1;
+                            if (pendingRadarStartedAt === null) {
+                                pendingRadarStartedAt = performance.now();
+                            }
+
+                            // 窗口当前处于穿透状态、或页面失去焦点时，第一条进入事件
+                            // 必须在事件回调内立即判断。等待 requestAnimationFrame 会
+                            // 引入一到数帧的空窗，第一下点击可能已经落到底层应用。
+                            if (lastIgnoreState || !document.hasFocus()) {
+                                if (radarFrameId !== null) {
+                                    window.cancelAnimationFrame(radarFrameId);
+                                    radarFrameId = null;
+                                }
+                                processRadarTick();
+                                return;
+                            }
+
+                            if (radarFrameId !== null) return;
+                            radarFrameId = window.requestAnimationFrame(processRadarTick);
                         });
                     }
                 }

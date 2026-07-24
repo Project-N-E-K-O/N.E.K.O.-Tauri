@@ -92,7 +92,9 @@ MMDManager.prototype.setupFloatingButtons = function() {
 
     // 鼠标位置跟踪
     const updateMousePosition = (e) => {
-        this._mmdMousePos = { x: typeof e.clientX === 'number' ? e.clientX : 0, y: typeof e.clientY === 'number' ? e.clientY : 0 };
+        this._mmdMousePos = this._mmdMousePos || { x: 0, y: 0 };
+        this._mmdMousePos.x = typeof e.clientX === 'number' ? e.clientX : 0;
+        this._mmdMousePos.y = typeof e.clientY === 'number' ? e.clientY : 0;
         this._mmdMousePosTs = Date.now();
     };
     const mouseListenerOptions = { passive: true, capture: true };

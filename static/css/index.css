@@ -783,8 +783,18 @@ body.react-chat-adapter-active #chat-container {
     will-change: transform;
 }
 
-#react-chat-window-shell.is-dragging {
-    box-shadow: 0 36px 110px rgba(12, 20, 34, 0.36);
+body.react-chat-window-dragging #react-chat-window-shell.is-dragging {
+    box-shadow: 0 8px 24px rgba(12, 20, 34, 0.22);
+    will-change: transform;
+    transition: none !important;
+    animation-play-state: paused;
+}
+
+/* 移动透明窗口里的毛玻璃会让 WebKit/Chromium 每帧重新合成背景。
+   只在拖动期间关闭，松手后立即恢复原有视觉效果。 */
+body.react-chat-window-dragging #react-chat-window-shell .window-topbar {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
 }
 
 /* GalGame 模式：撑高聊天框最小高度，避免移动/桌面下选项被裁切 */

@@ -33,6 +33,8 @@ class VRMInteraction {
         this.dragHandler = null;
         this.wheelHandler = null;
         this.mouseHoverHandler = null;  // 鼠标悬停时动态更新光标
+        this._dragFrameId = null;
+        this._pendingDragPosition = null;
 
         // 射线检测（用于判断鼠标是否在模型上）
         this._raycaster = THREE ? new THREE.Raycaster() : null;
@@ -157,6 +159,72 @@ class VRMInteraction {
         // 先清理旧的事件监听器
         this.cleanupDragAndZoom();
 
+        const cancelPendingDragMove = () => {
+            if (this._dragFrameId !== null) {
+                window.cancelAnimationFrame(this._dragFrameId);
+            }
+            this._dragFrameId = null;
+            this._pendingDragPosition = null;
+        };
+
+        const applyPendingDragMove = () => {
+            this._dragFrameId = null;
+            const position = this._pendingDragPosition;
+            this._pendingDragPosition = null;
+            if (!position || !this.isDragging || !this.manager.currentModel) return;
+
+            const deltaX = position.x - this.previousMousePosition.x;
+            const deltaY = position.y - this.previousMousePosition.y;
+
+            if (this.dragMode === 'pan' && this.manager.currentModel.scene) {
+                // 动态计算平移速度：根据相机距离和FOV，使鼠标移动距离与屏幕上模型移动距离同步
+                const camera = this.manager.camera;
+                const renderer = this.manager.renderer;
+                const scene = this.manager.currentModel.scene;
+                const cameraDistance = camera.position.distanceTo(scene.position);
+                const fov = camera.fov * (Math.PI / 180);
+                const screenHeight = renderer.domElement.clientHeight;
+                const screenWidth = renderer.domElement.clientWidth;
+                const worldHeight = 2 * Math.tan(fov / 2) * cameraDistance;
+                const worldWidth = worldHeight * (screenWidth / screenHeight);
+                const pixelToWorldX = worldWidth / screenWidth;
+                const pixelToWorldY = worldHeight / screenHeight;
+                const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+                const newPosition = scene.position.clone();
+
+                newPosition.add(right.multiplyScalar(deltaX * pixelToWorldX));
+                newPosition.add(up.multiplyScalar(-deltaY * pixelToWorldY));
+                scene.position.copy(this.clampModelPosition(newPosition));
+            } else if (this.dragMode === 'orbit' && this._orbitStartQuat && this._orbitPivot) {
+                const scene = this.manager.currentModel.scene;
+                if (!scene) return;
+
+                const rotateSpeed = 0.005;
+                const totalDx = position.x - this._orbitStartMouse.x;
+                const totalDy = position.y - this._orbitStartMouse.y;
+                const yQuat = new THREE.Quaternion().setFromAxisAngle(
+                    new THREE.Vector3(0, 1, 0), totalDx * rotateSpeed);
+                const xQuat = new THREE.Quaternion().setFromAxisAngle(
+                    new THREE.Vector3(1, 0, 0), totalDy * rotateSpeed);
+                const totalQuat = new THREE.Quaternion().multiplyQuaternions(yQuat, xQuat);
+                const offset = new THREE.Vector3().subVectors(this._orbitStartPos, this._orbitPivot);
+                const rotatedOffset = offset.clone().applyQuaternion(totalQuat);
+
+                scene.position.copy(this._orbitPivot).add(rotatedOffset);
+                scene.quaternion.copy(this._orbitStartQuat).premultiply(totalQuat);
+            }
+
+            this.previousMousePosition = position;
+        };
+
+        const flushPendingDragMove = () => {
+            if (this._dragFrameId !== null) {
+                window.cancelAnimationFrame(this._dragFrameId);
+            }
+            applyPendingDragMove();
+        };
+
         // 1. 鼠标按下
         this.mouseDownHandler = (e) => {
             if (!this.manager._isModelReadyForInteraction) return;
@@ -174,6 +242,7 @@ class VRMInteraction {
                 this._isSnappingModel = false;
             }
 
+            cancelPendingDragMove();
             if (e.button === 0 || e.button === 1) { // 左键或中键
                 // 只有点击到模型才开始拖拽（射线检测）
                 if (!this._hitTestModel(e.clientX, e.clientY)) {
@@ -217,11 +286,12 @@ class VRMInteraction {
             }
         };
 
-        // 2. 鼠标移动 (核心拖拽逻辑)
+        // 2. 鼠标移动：只保留每一帧的最新坐标，防止高频 mousemove 排队。
         this.dragHandler = (e) => {
             if (!this.manager._isModelReadyForInteraction) return;
             if (isYuiGuideDragLocked()) {
                 if (this.isDragging) {
+                    cancelPendingDragMove();
                     e.preventDefault();
                     e.stopPropagation();
                     this.isDragging = false;
@@ -233,6 +303,7 @@ class VRMInteraction {
             }
             if (this.checkLocked()) {
                 if (this.isDragging) {
+                    cancelPendingDragMove();
                     e.preventDefault();
                     e.stopPropagation();
                     this.isDragging = false;
@@ -246,74 +317,10 @@ class VRMInteraction {
 
             if (!this.isDragging || !this.manager.currentModel) return;
 
-            const deltaX = e.clientX - this.previousMousePosition.x;
-            const deltaY = e.clientY - this.previousMousePosition.y;
-
-            if (this.dragMode === 'pan' && this.manager.currentModel && this.manager.currentModel.scene) {
-                // 动态计算平移速度：根据相机距离和FOV，使鼠标移动距离与屏幕上模型移动距离同步
-                // 这样无论缩放级别如何，鼠标移动100像素，模型在屏幕上也移动100像素
-                const camera = this.manager.camera;
-                const renderer = this.manager.renderer;
-
-                // 计算相机到模型中心的距离
-                const modelCenter = this.manager.currentModel.scene.position.clone();
-                const cameraDistance = camera.position.distanceTo(modelCenter);
-
-                // 计算在当前距离下，屏幕视口对应的世界空间尺寸
-                const fov = camera.fov * (Math.PI / 180); // 转换为弧度
-                const screenHeight = renderer.domElement.clientHeight;
-                const screenWidth = renderer.domElement.clientWidth;
-
-                // 在相机距离处，视口的世界空间高度
-                const worldHeight = 2 * Math.tan(fov / 2) * cameraDistance;
-                // 根据宽高比计算世界空间宽度
-                const worldWidth = worldHeight * (screenWidth / screenHeight);
-
-                // 计算每像素对应的世界空间距离
-                const pixelToWorldX = worldWidth / screenWidth;
-                const pixelToWorldY = worldHeight / screenHeight;
-
-                const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
-
-                // 计算新位置：鼠标移动的像素 × 每像素对应的世界空间距离
-                const newPosition = this.manager.currentModel.scene.position.clone();
-                newPosition.add(right.multiplyScalar(deltaX * pixelToWorldX));
-                newPosition.add(up.multiplyScalar(-deltaY * pixelToWorldY));
-
-                // 使用边界限制
-                const finalPosition = this.clampModelPosition(newPosition);
-
-                // 应用位置（按钮和锁图标位置由 _startUIUpdateLoop 自动更新）
-                this.manager.currentModel.scene.position.copy(finalPosition);
-            } else if (this.dragMode === 'orbit' && this._orbitStartQuat && this._orbitPivot) {
-                // 右键拖拽：模型绕包围盒中心旋转（Y轴左右 + X轴上下），相机保持不动
-                // 对齐 MMD 的 orbit 实现（见 mmd-interaction.js:256-279）。
-                const scene = this.manager.currentModel?.scene;
-                if (!scene) return;
-
-                const rotateSpeed = 0.005;
-                const totalDx = e.clientX - this._orbitStartMouse.x;
-                const totalDy = e.clientY - this._orbitStartMouse.y;
-
-                // 世界轴 Y（左右）+ 世界轴 X（上下）
-                const yQuat = new THREE.Quaternion().setFromAxisAngle(
-                    new THREE.Vector3(0, 1, 0), totalDx * rotateSpeed);
-                const xQuat = new THREE.Quaternion().setFromAxisAngle(
-                    new THREE.Vector3(1, 0, 0), totalDy * rotateSpeed);
-                const totalQuat = new THREE.Quaternion().multiplyQuaternions(yQuat, xQuat);
-
-                // 绕 _orbitPivot 旋转：先把 scene.position 相对 pivot 的偏移旋转后放回，
-                // 使包围盒中心保持不动，模型只在屏幕上"原地转身"。
-                const offset = new THREE.Vector3().subVectors(this._orbitStartPos, this._orbitPivot);
-                const rotatedOffset = offset.clone().applyQuaternion(totalQuat);
-                scene.position.copy(this._orbitPivot).add(rotatedOffset);
-
-                // 每帧从起始姿态重新乘出（幂等），避免增量累加的漂移
-                scene.quaternion.copy(this._orbitStartQuat).premultiply(totalQuat);
+            this._pendingDragPosition = { x: e.clientX, y: e.clientY };
+            if (this._dragFrameId === null) {
+                this._dragFrameId = window.requestAnimationFrame(applyPendingDragMove);
             }
-
-            this.previousMousePosition = { x: e.clientX, y: e.clientY };
         };
 
         // 3. 鼠标释放
@@ -322,6 +329,7 @@ class VRMInteraction {
             if (this.isDragging) {
                 e.preventDefault();
                 e.stopPropagation();
+                flushPendingDragMove();
                 // 保留本次拖拽类型再清状态，跨屏切换只对 pan 生效
                 // （orbit 绕包围盒中心原地转身，屏幕投影不位移，无需多屏切换）
                 const wasPanDrag = this.dragMode === 'pan';
@@ -360,6 +368,11 @@ class VRMInteraction {
         let _lastHoverHitTestAt = 0;
         this.mouseHoverHandler = (e) => {
             if (this.isDragging || this.checkLocked()) return;
+            if (document.body && (
+                document.body.classList.contains('neko-model-dragging')
+                || document.body.classList.contains('react-chat-window-dragging')
+                || document.body.classList.contains('react-chat-window-resizing')
+            )) return;
             const now = performance.now();
             if ((now - _lastHoverHitTestAt) < 80) return;
             _lastHoverHitTestAt = now;
@@ -558,6 +571,12 @@ class VRMInteraction {
      * 移除时必须使用相同的选项，否则 removeEventListener 不会生效
      */
     cleanupDragAndZoom() {
+        if (this._dragFrameId !== null) {
+            window.cancelAnimationFrame(this._dragFrameId);
+            this._dragFrameId = null;
+        }
+        this._pendingDragPosition = null;
+
         if (!this.manager.renderer) return;
 
         // 清理初始化定时器（如果存在）
@@ -1444,6 +1463,11 @@ class VRMInteraction {
             if (!this.manager._isModelReadyForInteraction) return;
             if (!this.manager.currentModel || !this.manager.currentModel.vrm) return;
             if (!this.manager.renderer || !this.manager.camera) return;
+            if (document.body && (
+                document.body.classList.contains('neko-model-dragging')
+                || document.body.classList.contains('react-chat-window-dragging')
+                || document.body.classList.contains('react-chat-window-resizing')
+            )) return;
 
             // 从事件更新 Ctrl 键状态（与 Live2D 侧一致）
             if (event.isTrusted) {

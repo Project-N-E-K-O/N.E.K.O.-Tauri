@@ -5,7 +5,7 @@
   "identifier": "com.liu.neko-tauri",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://127.0.0.1:48911",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -18,6 +18,8 @@
         "width": 1920,
         "height": 1080,
         "maximized": false,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true,
         "acceptFirstMouse": true,
         "transparent": true,
         "decorations": false,

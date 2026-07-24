@@ -25,6 +25,9 @@ router = APIRouter(tags=["pages"])
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _YUI_GUIDE_ASSET_VERSION_PATHS = (
+    # Tauri 的透明区域命中诊断位于该文件。把它纳入统一版本号，
+    # 避免 WebView 在代码更新后继续运行旧的鼠标穿透逻辑。
+    _PROJECT_ROOT / "static/live2d-core.js",
     _PROJECT_ROOT / "static/css/yui-guide.css",
     _PROJECT_ROOT / "static/yui-guide-steps.js",
     _PROJECT_ROOT / "static/yui-guide-overlay.js",

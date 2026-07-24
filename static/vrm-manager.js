@@ -296,6 +296,11 @@ class VRMManager {
 
         if (!this._mouseMoveHandler) {
             this._mouseMoveHandler = (event) => {
+                if (document.body && (
+                    document.body.classList.contains('neko-model-dragging')
+                    || document.body.classList.contains('react-chat-window-dragging')
+                    || document.body.classList.contains('react-chat-window-resizing')
+                )) return;
                 this._setLookAtTargetByMouse(event.clientX, event.clientY);
             };
             document.addEventListener('mousemove', this._mouseMoveHandler, { passive: true });

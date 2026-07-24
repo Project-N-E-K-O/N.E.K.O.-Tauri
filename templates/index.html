@@ -9,7 +9,7 @@
       function safeTauriOpen(url) {
           if (!url || typeof url !== 'string') return;
           let finalUrl = url.startsWith('/') ? SERVER_URL + url : url;
-          let invokeFunc = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) || 
+          let invokeFunc = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) ||
                            (window.__TAURI__ && window.__TAURI__.invoke);
           if (invokeFunc) {
               invokeFunc('open_new_window', { url: finalUrl, label: 'neko_win_' + Date.now() })
@@ -17,23 +17,23 @@
           }
       }
 
-      window.open = function(url) { 
-          safeTauriOpen(url); 
-          return { closed: true, focus: function(){} }; 
+      window.open = function(url) {
+          safeTauriOpen(url);
+          return { closed: true, focus: function(){} };
       };
       window.openOrFocusWindow = window.open;
 
       const originalPushState = history.pushState;
       history.pushState = function(state, title, url) {
           if (typeof url === 'string' && (
-              url.includes('/voice_clone') || 
-              url.includes('/api_key') || 
-              url.includes('/model_manager') || 
+              url.includes('/voice_clone') ||
+              url.includes('/api_key') ||
+              url.includes('/model_manager') ||
               url.includes('/character_card_manager')
           )) {
               console.log("[Tauri] 拦截到跳转，转为新窗口:", url);
               safeTauriOpen(url);
-              return; 
+              return;
           }
           return originalPushState.apply(this, arguments);
       };
@@ -44,7 +44,7 @@
               if (el.tagName === 'A' && el.getAttribute('href')) {
                   let href = el.getAttribute('href');
                   if (href.startsWith('/voice_clone') || href.startsWith('/api_key') || href.startsWith('/model_manager') || href.startsWith('/character_card_manager')) {
-                      e.preventDefault(); 
+                      e.preventDefault();
                       e.stopPropagation();
                       safeTauriOpen(href);
                       return;
@@ -92,6 +92,43 @@
 </head>
 
 <body class="subtitle-web-host">
+    <script>
+      // 仅在 NEKO_X11_STATIC_INPUT_REGION 诊断模式下显示。矩形和 Rust
+      // 固定 ShapeInput 的默认坐标一致，用于区分“区域内由 N.E.K.O 接收”
+      // 和“区域外应由视觉上的下层窗口接收”。
+      if (new URLSearchParams(window.location.search).has('neko_x11_static_input_region')) {
+        window.addEventListener('DOMContentLoaded', () => {
+          const marker = document.createElement('button');
+          let clickCount = 0;
+          const dpr = window.devicePixelRatio || 1;
+          marker.type = 'button';
+          marker.textContent = 'N.E.K.O X11 测试区（点击计数：0）';
+          marker.setAttribute('aria-label', 'N.E.K.O X11 固定输入区域测试');
+          Object.assign(marker.style, {
+            position: 'fixed',
+            left: `${24 / dpr}px`,
+            top: `${24 / dpr}px`,
+            width: `${320 / dpr}px`,
+            height: `${220 / dpr}px`,
+            zIndex: '2147483647',
+            border: '4px solid #ff4f9a',
+            borderRadius: '18px',
+            color: '#ffffff',
+            background: 'rgba(80, 18, 58, 0.88)',
+            fontSize: '18px',
+            fontWeight: '700',
+            cursor: 'pointer',
+            pointerEvents: 'auto'
+          });
+          marker.addEventListener('click', () => {
+            clickCount += 1;
+            marker.textContent = `N.E.K.O X11 测试区（点击计数：${clickCount}）`;
+            console.info('[InputRegionDiagnostic] 测试区收到点击', { clickCount });
+          });
+          document.body.appendChild(marker);
+        }, { once: true });
+      }
+    </script>
 
     <!-- 旧的按钮面板已迁移到浮动按钮系统（live2d.js），保留隐藏的旧按钮元素供功能触发使用 -->
     <div id="sidebar" style="display: none;">

@@ -109,10 +109,9 @@ VRMManager.prototype.setupFloatingButtons = function() {
 
     // 鼠标位置跟踪
     const updateMousePosition = (e) => {
-        this._vrmMousePos = {
-            x: typeof e.clientX === 'number' ? e.clientX : 0,
-            y: typeof e.clientY === 'number' ? e.clientY : 0
-        };
+        this._vrmMousePos = this._vrmMousePos || { x: 0, y: 0 };
+        this._vrmMousePos.x = typeof e.clientX === 'number' ? e.clientX : 0;
+        this._vrmMousePos.y = typeof e.clientY === 'number' ? e.clientY : 0;
         this._vrmMousePosTs = Date.now();
     };
     const mouseListenerOptions = { passive: true, capture: true };

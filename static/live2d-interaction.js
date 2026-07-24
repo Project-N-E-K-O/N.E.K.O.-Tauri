@@ -302,6 +302,33 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
     this._isDraggingModel = false;
     let dragStartPos = new PIXI.Point();
 
+    const cancelPendingDragMove = () => {
+        if (this._dragMoveFrameId !== null && this._dragMoveFrameId !== undefined) {
+            window.cancelAnimationFrame(this._dragMoveFrameId);
+        }
+        this._dragMoveFrameId = null;
+        this._pendingModelDragPosition = null;
+    };
+
+    const applyPendingDragMove = () => {
+        this._dragMoveFrameId = null;
+        const position = this._pendingModelDragPosition;
+        this._pendingModelDragPosition = null;
+        if (!position || !this._isDraggingModel || !this._isModelReadyForInteraction) return;
+
+        model.x = position.x - dragStartPos.x;
+        model.y = position.y - dragStartPos.y;
+    };
+
+    const flushPendingDragMove = () => {
+        if (this._dragMoveFrameId !== null && this._dragMoveFrameId !== undefined) {
+            window.cancelAnimationFrame(this._dragMoveFrameId);
+        }
+        applyPendingDragMove();
+    };
+
+    cancelPendingDragMove();
+
     // 点击检测相关变量
     let clickStartTime = 0;
     let clickStartX = 0;
@@ -352,6 +379,7 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
             return;
         }
 
+        cancelPendingDragMove();
         this._isDraggingModel = true;
         this.isFocusing = false; // 拖拽时禁用聚焦
         const globalPos = event.data.global;
@@ -372,6 +400,9 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
 
     const onDragEnd = async () => {
         if (this._isDraggingModel) {
+            // pointerup 可能早于最后一个动画帧；先应用最新坐标再保存，
+            // 避免松手时模型落后鼠标一截。
+            flushPendingDragMove();
             this._isDraggingModel = false;
             document.getElementById('live2d-canvas').style.cursor = '';
             restoreButtonPointerEvents();
@@ -449,6 +480,7 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
         if (!this._isModelReadyForInteraction) return;
         if (this._isDraggingModel) {
             if (isYuiGuideDragLocked()) {
+                cancelPendingDragMove();
                 this._isDraggingModel = false;
                 document.getElementById('live2d-canvas').style.cursor = '';
                 restoreButtonPointerEvents();
@@ -458,6 +490,7 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
             // 再次检查是否变成多点触摸
             if (event.touches && event.touches.length > 1) {
                 // 如果变成多点触摸，停止拖拽
+                cancelPendingDragMove();
                 this._isDraggingModel = false;
                 document.getElementById('live2d-canvas').style.cursor = '';
                 // 【维护注意】所有退出拖拽的路径都必须调用 restoreButtonPointerEvents，
@@ -472,15 +505,17 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
             const y = event.clientY;
 
             // 检测是否移动超过阈值
-            const moveDistance = Math.sqrt(
-                Math.pow(x - clickStartX, 2) + Math.pow(y - clickStartY, 2)
-            );
+            const moveDistance = Math.hypot(x - clickStartX, y - clickStartY);
             if (moveDistance > CLICK_THRESHOLD_DISTANCE) {
                 hasMoved = true;
             }
 
-            model.x = x - dragStartPos.x;
-            model.y = y - dragStartPos.y;
+            // 原始 pointermove 频率可能远高于显示器刷新率。只保留最新坐标，
+            // 每个动画帧更新一次，避免事件队列逐条回放造成明显拖尾。
+            this._pendingModelDragPosition = { x, y };
+            if (this._dragMoveFrameId === null || this._dragMoveFrameId === undefined) {
+                this._dragMoveFrameId = window.requestAnimationFrame(applyPendingDragMove);
+            }
         }
     };
 
@@ -784,6 +819,14 @@ Live2DManager.prototype.enableMouseTracking = function (model, options = {}) {
     // 方法2：同时保留 window 的 pointermove 监听（适用于普通浏览器）
     const onPointerMove = (event) => {
         if (!this._isModelReadyForInteraction) return;
+        const body = document.body;
+        if (body && (
+            body.classList.contains('neko-model-dragging')
+            || body.classList.contains('react-chat-window-dragging')
+            || body.classList.contains('react-chat-window-resizing')
+        )) {
+            return;
+        }
         // 更新 Ctrl 键状态：综合事件中的状态和本地状态
         // 如果是真实事件，更新本地状态；如果是模拟事件，本地状态保持不变（除非事件里带了 Ctrl）
         if (event.isTrusted) {

@@ -8,9 +8,11 @@ for different model providers (qwen, glm, gpt), including:
 - Rate limiting behavior for native image input
 - Vision model fallback for models without native vision support
 """
-import pytest
+import asyncio
 import json
 from unittest.mock import AsyncMock
+
+import pytest
 
 import sys
 import os
@@ -132,18 +134,66 @@ async def test_image_rate_limiting():
 
 @pytest.mark.unit
 async def test_non_native_vision_fallback():
-    """Test that models without native vision use VISION_MODEL fallback."""
+    """Fallback injects pending and completed vision context immediately."""
     client = _make_client("step-realtime", supports_native_image=False)
-    # Mark the image description as "analyzing" to trigger the vision model path
-    client._image_description = "实时屏幕截图或相机画面正在分析中"
-    
-    # Mock the _analyze_image_with_vision_model method
-    client._analyze_image_with_vision_model = AsyncMock()
+
+    async def analyze(_image_b64):
+        client._image_description = "[实时屏幕截图或相机画面]: 测试屏幕内容"
+        client._image_recognized_this_turn = True
+        return "测试屏幕内容"
+
+    client._analyze_image_with_vision_model = AsyncMock(side_effect=analyze)
     
     await client.stream_image(DUMMY_IMAGE_B64)
     
-    # Should have called vision model fallback
-    assert client._analyze_image_with_vision_model.called
+    assert client._analyze_image_with_vision_model.await_count == 1
     assert client._analyze_image_with_vision_model.call_args[0][0] == DUMMY_IMAGE_B64
-    
+
+    sent = [json.loads(call.args[0]) for call in client.ws.send.call_args_list]
+    context_events = [
+        event for event in sent
+        if event.get("type") == "conversation.item.create"
+    ]
+    assert len(context_events) == 2
+    pending_text = context_events[0]["item"]["content"][0]["text"]
+    ready_text = context_events[1]["item"]["content"][0]["text"]
+    assert "正在分析中" in pending_text
+    assert ready_text == "[实时屏幕截图或相机画面]: 测试屏幕内容"
+    assert client._image_sent_this_turn is True
+    assert client._image_being_analyzed is False
+
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_non_native_vision_fallback_serializes_concurrent_frames():
+    """Concurrent 1 FPS frames must not duplicate expensive analysis."""
+    client = _make_client("free-model", supports_native_image=False)
+    analysis_started = asyncio.Event()
+    allow_analysis_to_finish = asyncio.Event()
+
+    async def analyze(_image_b64):
+        analysis_started.set()
+        await allow_analysis_to_finish.wait()
+        client._image_description = "[实时屏幕截图或相机画面]: 已识别"
+        client._image_recognized_this_turn = True
+        return "已识别"
+
+    client._analyze_image_with_vision_model = AsyncMock(side_effect=analyze)
+
+    first_frame = asyncio.create_task(client.stream_image(DUMMY_IMAGE_B64))
+    await analysis_started.wait()
+    second_frame = asyncio.create_task(client.stream_image(DUMMY_IMAGE_B64))
+    await asyncio.sleep(0)
+    allow_analysis_to_finish.set()
+    await asyncio.gather(first_frame, second_frame)
+
+    assert client._analyze_image_with_vision_model.await_count == 1
+    sent = [json.loads(call.args[0]) for call in client.ws.send.call_args_list]
+    context_events = [
+        event for event in sent
+        if event.get("type") == "conversation.item.create"
+    ]
+    assert len(context_events) == 2
+
     await client.close()

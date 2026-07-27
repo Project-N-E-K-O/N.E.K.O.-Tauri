@@ -10,12 +10,26 @@ const env = { ...process.env };
 // transparent window can silently display an empty proxy error response.
 ensureLoopbackNoProxy(env);
 
-// Tao cannot read the global cursor position on native Wayland. The desktop-pet
-// hit test needs that position even while the transparent window ignores input,
-// so Linux runs through X11/XWayland until a compositor-native implementation is
-// available.
+// niri has a compositor-native GTK input-region implementation. Other Linux
+// desktops keep the proven X11/XShape path until they receive the same backend.
 if (process.platform === "linux") {
-  env.GDK_BACKEND = "x11";
+  env.GDK_BACKEND = env.NIRI_SOCKET ? "wayland" : "x11";
+
+  const layerShell = spawnSync(
+    "pkg-config",
+    ["--exists", "gtk-layer-shell-0"],
+    { env, stdio: "ignore" },
+  );
+  if (layerShell.status !== 0) {
+    console.error(
+      [
+        "缺少 Linux 原生开发依赖 gtk-layer-shell。",
+        "Debian/Ubuntu 可执行：sudo apt install libgtk-layer-shell-dev",
+        "需要由该软件包提供 gtk-layer-shell-0.pc 后再启动 Tauri。",
+      ].join("\n"),
+    );
+    process.exit(1);
+  }
 }
 
 if (process.platform === "linux" && env.SNAP) {
@@ -37,6 +51,7 @@ if (process.platform === "linux" && env.SNAP) {
     "GIO_LAUNCHED_DESKTOP_FILE",
     "GIO_LAUNCHED_DESKTOP_FILE_PID",
     "GIO_MODULE_DIR",
+    "GSETTINGS_SCHEMA_DIR",
     "GTK_EXE_PREFIX",
     "GTK_IM_MODULE_FILE",
     "GTK_MODULES",

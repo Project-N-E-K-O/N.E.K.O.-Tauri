@@ -4,7 +4,11 @@
 orchestration. Native window behavior lives in exactly one implementation
 selected by `platform/mod.rs` at compile time:
 
-- `linux.rs`: GTK/X11 overlay and ShapeInput regions.
+- `linux.rs`: GTK overlay integration. GNOME/KDE use X11 ShapeInput;
+  niri uses a Wayland layer-shell carrier plus native `wl_surface` input
+  regions. Linux builds require the native development package that provides
+  `gtk-layer-shell-0.pc` (for example `libgtk-layer-shell-dev` on
+  Debian/Ubuntu).
 - `macos.rs`: AppKit window level, primary-screen geometry and mouse ignoring.
 - `windows.rs`: Windows virtual-desktop sizing and native click-through.
 

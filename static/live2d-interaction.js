@@ -358,6 +358,21 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
         ));
     };
 
+    const releaseModelPointerCapture = () => {
+        const canvas = document.getElementById('live2d-canvas');
+        const pointerId = this._modelDragPointerId;
+        this._modelDragPointerId = null;
+        if (!canvas || pointerId === null || pointerId === undefined
+            || typeof canvas.releasePointerCapture !== 'function') return;
+        try {
+            if (!canvas.hasPointerCapture || canvas.hasPointerCapture(pointerId)) {
+                canvas.releasePointerCapture(pointerId);
+            }
+        } catch (_) {
+            // WebKitGTK may already have released capture during cancellation.
+        }
+    };
+
 
 
     // 点击触发随机表情和动作（低优先级，会自动恢复）
@@ -377,6 +392,17 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
         if (originalEvent && originalEvent.touches && originalEvent.touches.length > 1) {
             // 多点触摸时不启动拖拽
             return;
+        }
+
+        const canvas = document.getElementById('live2d-canvas');
+        if (originalEvent && canvas && Number.isFinite(originalEvent.pointerId)
+            && typeof canvas.setPointerCapture === 'function') {
+            try {
+                canvas.setPointerCapture(originalEvent.pointerId);
+                this._modelDragPointerId = originalEvent.pointerId;
+            } catch (_) {
+                this._modelDragPointerId = null;
+            }
         }
 
         cancelPendingDragMove();
@@ -399,6 +425,7 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
     });
 
     const onDragEnd = async () => {
+        releaseModelPointerCapture();
         if (this._isDraggingModel) {
             // pointerup 可能早于最后一个动画帧；先应用最新坐标再保存，
             // 避免松手时模型落后鼠标一截。
@@ -482,6 +509,7 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
             if (isYuiGuideDragLocked()) {
                 cancelPendingDragMove();
                 this._isDraggingModel = false;
+                releaseModelPointerCapture();
                 document.getElementById('live2d-canvas').style.cursor = '';
                 restoreButtonPointerEvents();
                 return;
@@ -492,6 +520,7 @@ Live2DManager.prototype.setupDragAndDrop = function (model) {
                 // 如果变成多点触摸，停止拖拽
                 cancelPendingDragMove();
                 this._isDraggingModel = false;
+                releaseModelPointerCapture();
                 document.getElementById('live2d-canvas').style.cursor = '';
                 // 【维护注意】所有退出拖拽的路径都必须调用 restoreButtonPointerEvents，
                 //  否则 body 上的 neko-model-dragging class 不会被移除，按钮将永久失效。

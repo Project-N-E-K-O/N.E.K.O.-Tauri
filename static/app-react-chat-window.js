@@ -2330,6 +2330,49 @@
     function bindDragging() {
         var header = getHeader();
         if (!header) return;
+        var capturedPointerId = null;
+
+        function releaseHeaderPointerCapture() {
+            if (capturedPointerId === null || typeof header.releasePointerCapture !== 'function') {
+                capturedPointerId = null;
+                return;
+            }
+            try {
+                if (!header.hasPointerCapture || header.hasPointerCapture(capturedPointerId)) {
+                    header.releasePointerCapture(capturedPointerId);
+                }
+            } catch (_) {
+                // WebKitGTK may already have released capture during cancellation.
+            }
+            capturedPointerId = null;
+        }
+
+        // niri 的全屏透明窗口会在交互区之外恢复鼠标穿透。按下标题栏后主动
+        // 捕获该指针，保证拖动越过对话框边缘时仍能收到 move/up 事件。
+        header.addEventListener('pointerdown', function (event) {
+            if (event.pointerType !== 'mouse' || typeof header.setPointerCapture !== 'function') return;
+            try {
+                header.setPointerCapture(event.pointerId);
+                capturedPointerId = event.pointerId;
+            } catch (_) {
+                capturedPointerId = null;
+            }
+        });
+
+        header.addEventListener('pointermove', function (event) {
+            if (!dragState || event.pointerType !== 'mouse') return;
+            updateDrag(event.clientX, event.clientY);
+        });
+
+        header.addEventListener('pointerup', function () {
+            releaseHeaderPointerCapture();
+            stopDrag();
+        });
+
+        header.addEventListener('pointercancel', function () {
+            releaseHeaderPointerCapture();
+            stopDrag({ suppressClick: true });
+        });
 
         header.addEventListener('mousedown', function (event) {
             var closeButton = $('reactChatWindowCloseButton');
@@ -2367,7 +2410,10 @@
             updateDrag(event.touches[0].clientX, event.touches[0].clientY);
         }, { passive: false });
 
-        document.addEventListener('mouseup', stopDrag);
+        document.addEventListener('mouseup', function () {
+            releaseHeaderPointerCapture();
+            stopDrag();
+        });
         document.addEventListener('touchend', function (event) {
             stopDrag({ changedTouches: event.changedTouches });
         });

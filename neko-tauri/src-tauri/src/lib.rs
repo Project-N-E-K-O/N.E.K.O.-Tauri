@@ -101,6 +101,9 @@ pub fn run() {
             // rectangle. Reveal only after the startup document has finished
             // loading; a finished backend page is also a safe fallback.
             reveal_main_window(&webview.window(), payload.url());
+            if let Some(main_window) = webview.app_handle().get_webview_window("main") {
+                platform::after_main_window_revealed(&main_window);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             greet,

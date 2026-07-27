@@ -20,14 +20,36 @@ fn cursor_changed(previous: Option<(f64, f64)>, current: (f64, f64)) -> bool {
 
 pub(crate) fn start(window: WebviewWindow) {
     thread::spawn(move || {
+        let diagnostics_enabled = std::env::var_os("NEKO_TAURI_RADAR_DIAGNOSTIC").is_some();
         let mut last_cursor = None;
         let mut last_emit = Instant::now()
             .checked_sub(IDLE_HEARTBEAT)
             .unwrap_or_else(Instant::now);
+        let mut last_diagnostic = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
         let mut active_until = Instant::now();
 
         loop {
-            if let Some(sample) = platform::cursor_sample(&window) {
+            let sample = platform::cursor_sample(&window);
+            if diagnostics_enabled && last_diagnostic.elapsed() >= Duration::from_millis(500) {
+                match sample {
+                    Some(sample) => println!(
+                        "[RadarDiagnostic] absolute=({:.1},{:.1}) relative_css=({:.1},{:.1}) zero_position={}",
+                        sample.absolute.0,
+                        sample.absolute.1,
+                        sample.relative.0,
+                        sample.relative.1,
+                        sample.absolute == (0.0, 0.0)
+                    ),
+                    None => println!(
+                        "[RadarDiagnostic] cursor_sample=unavailable; native Wayland may not expose global cursor/window coordinates"
+                    ),
+                }
+                last_diagnostic = Instant::now();
+            }
+
+            if let Some(sample) = sample {
                 let changed = cursor_changed(last_cursor, sample.absolute);
                 let heartbeat_due = last_emit.elapsed() >= IDLE_HEARTBEAT;
 

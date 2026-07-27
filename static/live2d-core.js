@@ -354,6 +354,9 @@ class Live2DManager {
                         window.__TAURI__
                         && /(?:X11|Linux)/i.test(window.navigator.userAgent || '')
                     );
+                    const usesNativeWaylandInputRegion = isLinuxTauri
+                        && new URLSearchParams(window.location.search || '')
+                            .has('neko_native_wayland_input_region');
                     let persistentRegionCache = {
                         expiresAt: 0,
                         rects: []
@@ -446,21 +449,39 @@ class Live2DManager {
                             ? window.mmdManager?.interaction?._cachedScreenBounds
                             : null;
                         if (vrmBounds) {
-                            pushEllipse(
-                                vrmBounds.minX,
-                                vrmBounds.minY,
-                                vrmBounds.maxX - vrmBounds.minX,
-                                vrmBounds.maxY - vrmBounds.minY,
-                                0.65
-                            );
+                            if (usesNativeWaylandInputRegion) {
+                                pushRect(
+                                    vrmBounds.minX,
+                                    vrmBounds.minY,
+                                    vrmBounds.maxX - vrmBounds.minX,
+                                    vrmBounds.maxY - vrmBounds.minY
+                                );
+                            } else {
+                                pushEllipse(
+                                    vrmBounds.minX,
+                                    vrmBounds.minY,
+                                    vrmBounds.maxX - vrmBounds.minX,
+                                    vrmBounds.maxY - vrmBounds.minY,
+                                    0.65
+                                );
+                            }
                         } else if (mmdBounds) {
-                            pushEllipse(
-                                mmdBounds.minX,
-                                mmdBounds.minY,
-                                mmdBounds.maxX - mmdBounds.minX,
-                                mmdBounds.maxY - mmdBounds.minY,
-                                0.65
-                            );
+                            if (usesNativeWaylandInputRegion) {
+                                pushRect(
+                                    mmdBounds.minX,
+                                    mmdBounds.minY,
+                                    mmdBounds.maxX - mmdBounds.minX,
+                                    mmdBounds.maxY - mmdBounds.minY
+                                );
+                            } else {
+                                pushEllipse(
+                                    mmdBounds.minX,
+                                    mmdBounds.minY,
+                                    mmdBounds.maxX - mmdBounds.minX,
+                                    mmdBounds.maxY - mmdBounds.minY,
+                                    0.65
+                                );
+                            }
                         } else if (
                             this.currentModel
                             && this.currentModel.visible !== false
@@ -468,7 +489,14 @@ class Live2DManager {
                         ) {
                             try {
                                 const bounds = this.currentModel.getBounds();
-                                pushEllipse(bounds.x, bounds.y, bounds.width, bounds.height, 0.82);
+                                if (usesNativeWaylandInputRegion) {
+                                    // Native Wayland intentionally exposes no global cursor
+                                    // coordinates. Keep the complete model bounds interactive;
+                                    // X11 can retain the tighter ellipse plus alpha radar.
+                                    pushRect(bounds.x, bounds.y, bounds.width, bounds.height);
+                                } else {
+                                    pushEllipse(bounds.x, bounds.y, bounds.width, bounds.height, 0.82);
+                                }
                             } catch (error) {
                                 console.warn('[ClickThrough] 无法读取 Live2D 模型边界:', error);
                             }
@@ -590,6 +618,7 @@ class Live2DManager {
                                 reason: 'drag-active',
                                 dragClasses: getActiveInteractionClasses(),
                                 physical: payload.slice(0, 2).map(value => Math.round(value)),
+                                dpr: window.devicePixelRatio || 1,
                                 radar: {
                                     queueDelayMs: Math.round(radarQueueDelayMs * 10) / 10,
                                     coalescedEvents: radarEventCount
@@ -733,7 +762,8 @@ class Live2DManager {
                                     dragClasses: getActiveInteractionClasses(),
                                     physical: Array.isArray(e.payload)
                                         ? e.payload.slice(0, 2).map(value => Math.round(value))
-                                        : null
+                                        : null,
+                                    dpr: window.devicePixelRatio || 1
                                 });
                                 return;
                             }

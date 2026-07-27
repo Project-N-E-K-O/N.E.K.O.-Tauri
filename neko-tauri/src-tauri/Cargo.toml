@@ -31,5 +31,6 @@ objc = "0.2"
 gdk = "0.18"
 gdkx11 = "0.18"
 gtk = "0.18"
+gtk-layer-shell = { version = "0.8.2", features = ["v0_6"] }
 webkit2gtk = "2"
 x11 = { version = "2.21", features = ["xlib"] }

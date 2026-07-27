@@ -8,8 +8,6 @@ N.E.K.O. 的实验性 Tauri 桌面外壳。
 - Electron 桌面壳参考：[Project-N-E-K-O/N.E.K.O.-PC](https://github.com/Project-N-E-K-O/N.E.K.O.-PC)
 - Tauri 宿主兼容 PR：[N.E.K.O #2488](https://github.com/Project-N-E-K-O/N.E.K.O/pull/2488)
 
-> 当前状态：开发中。接口与打包方式仍可能调整，不建议直接作为正式发行版使用。
-
 ## 仓库边界
 
 | 内容 | 维护位置 |

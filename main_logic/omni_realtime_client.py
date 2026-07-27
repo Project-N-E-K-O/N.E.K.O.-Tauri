@@ -50,6 +50,10 @@ logger = get_module_logger(__name__, "Main")
 # ── Proactive audio prompt cache ──────────────────────────────────────
 _PROACTIVE_AUDIO_DIR = Path(__file__).resolve().parent.parent / "static" / "proactive_audio"
 _PROACTIVE_AUDIO_CACHE: Dict[str, bytes] = {}
+_IMAGE_ANALYSIS_PENDING_CONTEXT = (
+    "[实时屏幕截图或相机画面正在分析中。先不要瞎编内容，可以稍等片刻。"
+    "在此期间不要用搜索功能应付。等收到画面分析结果后再描述画面。]"
+)
 
 
 def _load_proactive_audio(filename: str) -> bytes:
@@ -261,7 +265,7 @@ class OmniRealtimeClient:
         self._image_recognized_this_turn = False
         self._image_sent_this_turn = False
         self._image_being_analyzed = False
-        self._image_description = "[实时屏幕截图或相机画面正在分析中。先不要瞎编内容，可以稍等片刻。在此期间不要用搜索功能应付。等收到画面分析结果后再描述画面。]"
+        self._image_description = _IMAGE_ANALYSIS_PENDING_CONTEXT
         self._latest_image_b64 = None  # Cached latest screenshot for proactive injection
         self._proactive_image_consumed = True  # Whether the cached image has been used by a proactive nudge
         self._proactive_injecting = False  # True while prompt_ephemeral is injecting audio — suppresses mic input
@@ -1268,8 +1272,7 @@ class OmniRealtimeClient:
             
         except Exception as e:
             logger.error(f"Error analyzing image with vision model: {e}")
-            self.image_recognized_this_turn = True
-            self._image_being_analyzed = False
+            self._image_recognized_this_turn = True
             self._image_description = f"[实时屏幕截图或相机画面]: 分析出错: {str(e)}"
             # 检测内容审查错误并发送中文提示到前端（不关闭session）
             error_str = str(e)
@@ -1277,6 +1280,55 @@ class OmniRealtimeClient:
                 if self.on_status_message:
                     await self.on_status_message(json.dumps({"code": "IMAGE_BLOCKED"}))
             return "图片识别发生严重错误！"
+
+    async def _stream_image_with_vision_model(self, image_b64: str) -> None:
+        """Analyze one frame and inject both pending and ready context.
+
+        Realtime backends without native image input need a text description
+        from VISION_MODEL.  The previous first-frame fast path only updated
+        ``_image_description`` locally, so the realtime model could answer
+        before the description ever reached its conversation.  Serialize the
+        expensive analysis and inject the completed description immediately;
+        this does not depend on another frame arriving while the user speaks.
+        """
+        async with self._image_lock:
+            if self._image_recognized_this_turn:
+                return
+
+            self._image_being_analyzed = True
+            try:
+                pending_event = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": _IMAGE_ANALYSIS_PENDING_CONTEXT,
+                        }],
+                    },
+                }
+                logger.info("Sending image analysis pending context.")
+                await self.send_event(pending_event)
+
+                await self._analyze_image_with_vision_model(image_b64)
+
+                ready_event = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": self._image_description,
+                        }],
+                    },
+                }
+                logger.info("Sending image description after recognition.")
+                await self.send_event(ready_event)
+                self._image_sent_this_turn = True
+            finally:
+                self._image_being_analyzed = False
     
     async def stream_image(self, image_b64: str) -> None:
         """Stream raw image data to the API."""
@@ -1285,9 +1337,12 @@ class OmniRealtimeClient:
         self._proactive_image_consumed = False
 
         try:
-            # Models without native vision (step, free on lanlan.tech) — first frame triggers VISION_MODEL analysis
-            if '实时屏幕截图或相机画面正在分析中' in self._image_description and not self._supports_native_image:
-                await self._analyze_image_with_vision_model(image_b64)
+            # Models without native vision (step, free on lanlan.tech) use
+            # VISION_MODEL text context.  This path is independent of
+            # _audio_in_buffer so a completed analysis is available before
+            # the user's next utterance even while the microphone is idle.
+            if not self._supports_native_image:
+                await self._stream_image_with_vision_model(image_b64)
                 return
             
             # Rate limiting for native image input (with VAD-based throttling)
@@ -1349,47 +1404,6 @@ class OmniRealtimeClient:
                             ]
                         }
                     }
-                else:
-                    # Model does not support video streaming, use VISION_MODEL to analyze
-                    # Only recognize one image per conversation turn
-                    async with self._image_lock:
-                        if not self._image_recognized_this_turn:
-                            if not self._image_being_analyzed:
-                                self._image_being_analyzed = True
-                                text_event = {
-                                    "type": "conversation.item.create",
-                                    "item": {
-                                        "type": "message",
-                                        "role": "user",
-                                        "content": [
-                                            {
-                                                "type": "input_text",
-                                                "text": self._image_description
-                                            }
-                                        ]
-                                    }
-                                }
-                                logger.info("Sending image description before recognition.")
-                                await self.send_event(text_event)
-                                await self._analyze_image_with_vision_model(image_b64)
-                        elif not self._image_sent_this_turn:
-                            self._image_sent_this_turn = True
-                            text_event = {
-                                    "type": "conversation.item.create",
-                                    "item": {
-                                        "type": "message",
-                                        "role": "user",
-                                        "content": [
-                                            {
-                                                "type": "input_text",
-                                                "text": self._image_description
-                                            }
-                                        ]
-                                    }
-                                }
-                            logger.info("Sending image description after recognition.")
-                            await self.send_event(text_event)
-                    return
                     
                 await self.send_event(append_event)
         except Exception as e:

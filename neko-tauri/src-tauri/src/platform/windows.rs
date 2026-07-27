@@ -56,6 +56,8 @@ pub(crate) fn startup_input_region(_window: &tauri::WebviewWindow) -> Result<(),
     Ok(())
 }
 
+pub(crate) fn after_main_window_revealed(_window: &tauri::WebviewWindow) {}
+
 pub(crate) fn set_click_through(
     window: &tauri::Window,
     ignore: bool,

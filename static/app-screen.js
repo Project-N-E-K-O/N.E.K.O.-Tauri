@@ -1,5 +1,5 @@
 /**
- * app-screen.js — Screen sharing, video streaming, and Electron source selector
+ * app-screen.js — Screen sharing, video streaming, and desktop source selector
  *
  * Extracted from the monolithic app.js.
  * Follows the IIFE + window global pattern used by all app-*.js modules.
@@ -19,6 +19,18 @@
     const C = window.appConst;
     const safeT = window.safeT;
     const isMobile = window.appUtils.isMobile;
+
+    function getDesktopCaptureProvider() {
+        if (typeof window.getDesktopCaptureProvider === 'function') {
+            return window.getDesktopCaptureProvider();
+        }
+        return window.electronDesktopCapturer || window.tauriDesktopCapturer || null;
+    }
+
+    function isNativeFrameProvider(provider) {
+        return !!(provider && provider.nativeFrameCapture &&
+            typeof provider.captureSourceAsDataUrl === 'function');
+    }
 
     // ======================== DOM refs (lazy, filled on first use) ========================
     function dom(id) {
@@ -49,8 +61,9 @@
      */
     function pushSelectedSourceToMain(sourceId) {
         try {
-            if (window.electronDesktopCapturer && typeof window.electronDesktopCapturer.setSelectedSource === 'function') {
-                Promise.resolve(window.electronDesktopCapturer.setSelectedSource(sourceId || null))
+            var provider = getDesktopCaptureProvider();
+            if (provider && typeof provider.setSelectedSource === 'function') {
+                Promise.resolve(provider.setSelectedSource(sourceId || null))
                     .catch(function (e) { console.warn('[屏幕源] 同步选中源到主进程失败:', e); });
             }
         } catch (e) {
@@ -326,14 +339,17 @@
         }
 
         // 2. Electron selectedScreenSourceId → getUserMedia(chromeMediaSource)
+        // Tauri uses native frame capture and therefore must not enter this
+        // Chromium-specific MediaStream branch.
         var selectedSourceId = S.selectedScreenSourceId;
-        if (selectedSourceId && window.electronDesktopCapturer) {
+        var desktopProvider = getDesktopCaptureProvider();
+        if (selectedSourceId && desktopProvider && !isNativeFrameProvider(desktopProvider)) {
             try {
                 var timedOut = false;
                 var newStream = await Promise.race([
                     (async function () {
                         // 验证源存在
-                        var currentSources = await window.electronDesktopCapturer.getSources({
+                        var currentSources = await desktopProvider.getSources({
                             types: ['window', 'screen'],
                             thumbnailSize: { width: 1, height: 1 }
                         });
@@ -574,9 +590,13 @@
     mod.fetchBackendInteractiveScreenshot = fetchBackendInteractiveScreenshot;
 
     // ======================== stopScreening ========================
+    var nativeCaptureGeneration = 0;
+
     function stopScreening() {
+        nativeCaptureGeneration += 1;
         if (S.videoSenderInterval) {
             clearInterval(S.videoSenderInterval);
+            clearTimeout(S.videoSenderInterval);
             S.videoSenderInterval = null;
         }
     }
@@ -653,6 +673,58 @@
     }
     mod.startScreenVideoStreaming = startScreenVideoStreaming;
 
+    async function startNativeScreenStreaming(provider, sourceId, inputType) {
+        stopScreening();
+        var generation = nativeCaptureGeneration;
+
+        async function captureAndSend() {
+            var result = await provider.captureSourceAsDataUrl(sourceId, {
+                maxWidth: C.MAX_SCREENSHOT_WIDTH || 1280,
+                quality: 80
+            });
+            if (!result || !result.success || !result.dataUrl) {
+                var errorMessage = result && result.error ? result.error : '屏幕捕获失败';
+                if (errorMessage === 'Source not found') {
+                    clearSelectedScreenSource('Tauri 原生捕获源已失效');
+                }
+                throw new Error(errorMessage);
+            }
+            if (S.socket && S.socket.readyState === WebSocket.OPEN) {
+                S.socket.send(JSON.stringify({
+                    action: 'stream_data',
+                    data: result.dataUrl,
+                    input_type: inputType,
+                }));
+            }
+        }
+
+        // 首帧在启动流程内等待，确保权限被拒绝、来源失效等错误能正常反馈给用户。
+        await captureAndSend();
+
+        async function scheduleNextFrame() {
+            if (generation !== nativeCaptureGeneration) return;
+            try {
+                await captureAndSend();
+            } catch (error) {
+                console.warn('[屏幕源] Tauri 原生帧捕获失败:', error);
+                if (generation === nativeCaptureGeneration) {
+                    await stopScreenSharing(true);
+                    window.showStatusToast(
+                        safeT('app.screenSource.captureFailed', '屏幕捕获已停止，请检查系统权限或重新选择来源'),
+                        5000
+                    );
+                }
+                return;
+            }
+            if (generation === nativeCaptureGeneration) {
+                S.videoSenderInterval = setTimeout(scheduleNextFrame, 1000);
+            }
+        }
+
+        S.videoSenderInterval = setTimeout(scheduleNextFrame, 1000);
+    }
+    mod.startNativeScreenStreaming = startNativeScreenStreaming;
+
     // ======================== getMobileCameraStream ========================
     async function getMobileCameraStream() {
         var makeConstraints = function (facing) {
@@ -700,6 +772,8 @@
         }
 
         try {
+            var nativeCapture = null;
+
             // 初始化音频播放上下文
             if (window.showCurrentModel) await window.showCurrentModel(); // 智能显示当前模型
             if (!S.audioPlayerContext) {
@@ -725,13 +799,31 @@
                 } else {
 
                     // Desktop/laptop: capture the user's chosen screen / window / tab.
-                    // 检查是否有选中的特定屏幕源（仅Electron环境）
                     var selectedSourceId = window.getSelectedScreenSourceId ? window.getSelectedScreenSourceId() : null;
+                    var desktopProvider = getDesktopCaptureProvider();
 
-                    if (selectedSourceId && window.electronDesktopCapturer) {
+                    // Tauri does not expose a Chromium MediaStream source ID.
+                    // If the user has not selected anything yet, default to the
+                    // first native monitor so the main share button still works.
+                    if (!selectedSourceId && isNativeFrameProvider(desktopProvider)) {
+                        try {
+                            var initialScreens = await desktopProvider.getSources({ types: ['screen'] });
+                            if (initialScreens && initialScreens.length > 0) {
+                                selectedSourceId = initialScreens[0].id;
+                                S.selectedScreenSourceId = selectedSourceId;
+                                try { localStorage.setItem('selectedScreenSourceId', selectedSourceId); } catch (e) { }
+                                updateScreenSourceListSelection();
+                            }
+                        } catch (initialSourceError) {
+                            console.warn('[屏幕源] 无法取得 Tauri 默认屏幕源:', initialSourceError);
+                        }
+                    }
+
+                    if (selectedSourceId && desktopProvider &&
+                        typeof desktopProvider.getSources === 'function') {
                         // 验证选中的源是否仍然存在（窗口可能已关闭）
                         try {
-                            var currentSources = await window.electronDesktopCapturer.getSources({
+                            var currentSources = await desktopProvider.getSources({
                                 types: ['window', 'screen'],
                                 thumbnailSize: { width: 1, height: 1 }
                             });
@@ -764,7 +856,13 @@
                         }
                     }
 
-                    if (selectedSourceId && window.electronDesktopCapturer) {
+                    if (selectedSourceId && isNativeFrameProvider(desktopProvider)) {
+                        nativeCapture = {
+                            provider: desktopProvider,
+                            sourceId: selectedSourceId
+                        };
+                        console.log('[屏幕源] 使用 Tauri 原生捕获源:', selectedSourceId);
+                    } else if (selectedSourceId && desktopProvider) {
                         // 在Electron中使用选中的特定屏幕/窗口源
                         try {
                             S.screenCaptureStream = await navigator.mediaDevices.getUserMedia({
@@ -783,7 +881,7 @@
 
                             // 回退策略1: 尝试其他全屏源（chromeMediaSource 方式）
                             try {
-                                var fallbackSources = await window.electronDesktopCapturer.getSources({
+                                var fallbackSources = await desktopProvider.getSources({
                                     types: ['screen'],
                                     thumbnailSize: { width: 1, height: 1 }
                                 });
@@ -835,7 +933,7 @@
                         if (S.screenCaptureStream) {
                             console.log(window.t('console.screenShareUsingSource'), selectedSourceId);
                         }
-                    } else {
+                    } else if (!isNativeFrameProvider(desktopProvider)) {
                         // 使用标准的getDisplayMedia（显示系统选择器）
                         try {
                             S.screenCaptureStream = await navigator.mediaDevices.getDisplayMedia({
@@ -854,7 +952,13 @@
                 }
             }
 
-            if (S.screenCaptureStream) {
+            if (nativeCapture) {
+                await startNativeScreenStreaming(
+                    nativeCapture.provider,
+                    nativeCapture.sourceId,
+                    'screen'
+                );
+            } else if (S.screenCaptureStream) {
                 // 用户手势成功获取了流，重置自动弹窗失败标记
                 S.screenCaptureAutoPromptFailed = false;
                 // 正常流模式
@@ -954,6 +1058,12 @@
                         ? '屏幕捕获启动失败，可能与显卡驱动或系统权限有关，请尝试重启应用'
                         : '摄像头被其它应用占用？关闭扫码/拍照应用后重试';
                     break;
+            }
+            if (!hint && isDesktop && isNativeFrameProvider(getDesktopCaptureProvider())) {
+                hint = safeT(
+                    'app.screenSource.captureFailed',
+                    '屏幕捕获已停止，请检查系统权限或重新选择来源'
+                );
             }
             window.showStatusToast(err.name + ': ' + err.message + (hint ? '\n' + hint : ''), 5000);
         }
@@ -1185,8 +1295,8 @@
             return false;
         }
 
-        // 检查是否在Electron环境
-        if (!window.electronDesktopCapturer || !window.electronDesktopCapturer.getSources) {
+        var desktopProvider = getDesktopCaptureProvider();
+        if (!desktopProvider || typeof desktopProvider.getSources !== 'function') {
             screenPopup.innerHTML = '';
             var notAvailableItem = document.createElement('div');
             notAvailableItem.textContent = window.t ? window.t('app.screenSource.notAvailable') : '仅在桌面版可用';
@@ -1210,7 +1320,7 @@
             screenPopup.appendChild(loadingItem);
 
             // 获取屏幕源
-            var sources = await window.electronDesktopCapturer.getSources({
+            var sources = await desktopProvider.getSources({
                 types: ['window', 'screen'],
                 thumbnailSize: { width: 160, height: 100 }
             });

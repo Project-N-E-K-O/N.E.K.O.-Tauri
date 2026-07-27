@@ -21,6 +21,76 @@ async def test_starting_session_audio_does_not_enter_pending_input_data():
     assert mgr.pending_input_data == []
 
 
+async def test_inactive_media_streams_wait_for_explicit_session_start():
+    """Residual media frames after an API disconnect must not start sessions."""
+    for input_type in ("audio", "screen", "camera"):
+        mgr = LLMSessionManager.__new__(LLMSessionManager)
+        mgr.session_ready = False
+        mgr._starting_session_count = 0
+        mgr.pending_input_data = []
+        mgr.input_cache_lock = asyncio.Lock()
+        mgr.session = None
+        mgr.is_active = False
+        mgr.start_session = AsyncMock()
+        mgr._process_stream_data_internal = AsyncMock()
+
+        await LLMSessionManager._stream_data_now(
+            mgr,
+            {"input_type": input_type, "data": "frame"},
+        )
+
+        mgr.start_session.assert_not_awaited()
+        mgr._process_stream_data_internal.assert_not_awaited()
+
+
+async def test_internal_media_processing_cannot_bypass_explicit_start_guard():
+    """Flush/direct callers get the same no-auto-start rule as the public path."""
+    mgr = LLMSessionManager.__new__(LLMSessionManager)
+    mgr.session = None
+    mgr.is_active = False
+    mgr._starting_session_count = 0
+    mgr.start_session = AsyncMock()
+
+    await LLMSessionManager._process_stream_data_internal(
+        mgr,
+        {"input_type": "screen", "data": "frame"},
+    )
+
+    mgr.start_session.assert_not_awaited()
+
+
+async def test_inactive_text_keeps_legacy_auto_start():
+    """Text input remains a discrete user action and may auto-create its session."""
+    mgr = LLMSessionManager.__new__(LLMSessionManager)
+    mgr.session_ready = False
+    mgr._starting_session_count = 0
+    mgr.pending_input_data = []
+    mgr.input_cache_lock = asyncio.Lock()
+    mgr.session = None
+    mgr.is_active = False
+    mgr._session_start_circuit_open = False
+    mgr._emit_cooldown_turn_end_if_needed = lambda: False
+    mgr.websocket = object()
+    mgr.start_session = AsyncMock()
+    mgr._process_stream_data_internal = AsyncMock()
+
+    async def _start_session(*_args, **_kwargs):
+        mgr.session = object()
+        mgr.is_active = True
+
+    mgr.start_session.side_effect = _start_session
+
+    message = {"input_type": "text", "data": "hello"}
+    await LLMSessionManager._stream_data_now(mgr, message)
+
+    mgr.start_session.assert_awaited_once_with(
+        mgr.websocket,
+        new=False,
+        input_mode="text",
+    )
+    mgr._process_stream_data_internal.assert_awaited_once_with(message)
+
+
 async def test_flush_pending_input_data_routes_audio_through_bounded_queue():
     mgr = LLMSessionManager.__new__(LLMSessionManager)
     audio_msg = {"input_type": "audio", "data": [1] * 480}

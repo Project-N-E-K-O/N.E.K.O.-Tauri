@@ -1,6 +1,7 @@
 mod backend_runtime;
 mod platform;
 mod radar;
+mod screen_capture;
 
 use tauri::webview::PageLoadEvent;
 use tauri::Manager;
@@ -90,9 +91,14 @@ pub fn run() {
                 return;
             }
 
-            if platform::INJECT_CLICK_THROUGH_BRIDGE && is_backend_page(payload.url()) {
-                if let Err(error) = webview.eval(include_str!("click_through.js")) {
-                    eprintln!("注入 Tauri 鼠标命中桥接失败: {error}");
+            if is_backend_page(payload.url()) {
+                if let Err(error) = webview.eval(include_str!("screen_capture.js")) {
+                    eprintln!("注入 Tauri 屏幕捕获桥接失败: {error}");
+                }
+                if platform::INJECT_CLICK_THROUGH_BRIDGE {
+                    if let Err(error) = webview.eval(include_str!("click_through.js")) {
+                        eprintln!("注入 Tauri 鼠标命中桥接失败: {error}");
+                    }
                 }
             }
 
@@ -108,7 +114,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             set_click_through,
-            open_new_window
+            open_new_window,
+            screen_capture::get_screen_capture_capabilities,
+            screen_capture::get_screen_capture_sources,
+            screen_capture::capture_screen_source
         ])
         .setup(|app| {
             platform::configure_app(app);

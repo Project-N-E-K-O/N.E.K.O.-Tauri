@@ -43,6 +43,10 @@ function installBridge() {
   };
 }
 
+function flushAsync() {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 describe('Tauri click-through bridge', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
@@ -65,7 +69,7 @@ describe('Tauri click-through bridge', () => {
     expect(invoke).toHaveBeenCalledWith('set_click_through', { ignore: true });
   });
 
-  it('restores mouse input over the visible character bounds', () => {
+  it('restores mouse input over the visible character bounds', async () => {
     const container = document.createElement('div');
     container.id = 'live2d-container';
     document.body.appendChild(container);
@@ -82,13 +86,103 @@ describe('Tauri click-through bridge', () => {
     const { emitRadar, invoke } = installBridge();
 
     emitRadar(20, 20);
+    await flushAsync();
     emitRadar(180, 220);
+    await flushAsync();
 
     expect(invoke).toHaveBeenNthCalledWith(1, 'set_click_through', { ignore: true });
     expect(invoke).toHaveBeenNthCalledWith(2, 'set_click_through', { ignore: false });
   });
 
-  it('restores mouse input over ordinary UI controls', () => {
+  it('does not treat a precise model miss as a hit inside coarse bounds', () => {
+    const container = document.createElement('div');
+    container.id = 'mmd-container';
+    document.body.appendChild(container);
+    const hitTest = vi.fn(() => false);
+    Object.assign(window, {
+      mmdManager: {
+        hitTest,
+        getModelScreenBounds: () => ({
+          left: 100,
+          top: 80,
+          right: 300,
+          bottom: 480,
+        }),
+      },
+    });
+    const { emitRadar, invoke } = installBridge();
+
+    emitRadar(180, 220);
+
+    expect(hitTest).toHaveBeenCalledWith(180, 220);
+    expect(invoke).toHaveBeenCalledWith('set_click_through', { ignore: true });
+  });
+
+  it('keeps Live2D drawable regions interactive outside named hit areas', async () => {
+    const container = document.createElement('div');
+    container.id = 'live2d-container';
+    document.body.appendChild(container);
+    const hitTest = vi.fn(() => []);
+    const getModelInputRegionRects = vi.fn(() => ([
+      { left: 160, top: 200, right: 200, bottom: 260 },
+    ]));
+    Object.assign(window, {
+      live2dManager: {
+        currentModel: { hitTest },
+        getModelInputRegionRects,
+        getModelScreenBounds: () => ({
+          left: 100,
+          top: 80,
+          right: 300,
+          bottom: 480,
+        }),
+      },
+    });
+    const { emitRadar, invoke } = installBridge();
+
+    emitRadar(20, 20);
+    await flushAsync();
+    emitRadar(180, 220);
+    await flushAsync();
+
+    expect(getModelInputRegionRects).toHaveBeenCalledWith({ padding: 8 });
+    expect(hitTest).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenNthCalledWith(1, 'set_click_through', { ignore: true });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'set_click_through', { ignore: false });
+  });
+
+  it('uses Live2D drawable regions when a model has no hitTest method', async () => {
+    const container = document.createElement('div');
+    container.id = 'live2d-container';
+    document.body.appendChild(container);
+    const getModelInputRegionRects = vi.fn(() => ([
+      { left: 160, top: 200, right: 200, bottom: 260 },
+    ]));
+    Object.assign(window, {
+      live2dManager: {
+        currentModel: {},
+        getModelInputRegionRects,
+        getModelScreenBounds: () => ({
+          left: 100,
+          top: 80,
+          right: 300,
+          bottom: 480,
+        }),
+      },
+    });
+    const { emitRadar, invoke } = installBridge();
+
+    emitRadar(20, 20);
+    await flushAsync();
+    emitRadar(180, 220);
+    await flushAsync();
+
+    expect(getModelInputRegionRects).toHaveBeenCalledWith({ padding: 8 });
+    expect(invoke).toHaveBeenNthCalledWith(1, 'set_click_through', { ignore: true });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'set_click_through', { ignore: false });
+  });
+
+  it('restores mouse input over ordinary UI controls', async () => {
     const button = document.createElement('button');
     button.textContent = '设置';
     document.body.appendChild(button);
@@ -101,8 +195,10 @@ describe('Tauri click-through bridge', () => {
 
     vi.mocked(document.elementsFromPoint).mockReturnValue([document.body]);
     emitRadar(500, 500);
+    await flushAsync();
     vi.mocked(document.elementsFromPoint).mockReturnValue([button, document.body]);
     emitRadar(20, 20);
+    await flushAsync();
 
     expect(invoke).toHaveBeenNthCalledWith(1, 'set_click_through', { ignore: true });
     expect(invoke).toHaveBeenNthCalledWith(2, 'set_click_through', { ignore: false });

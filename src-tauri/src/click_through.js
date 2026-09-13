@@ -42,6 +42,8 @@
   var MODEL_EXIT_MARGIN = 10;
 
   var isIgnoring = false;
+  var desiredIgnore = false;
+  var ignoreTransition = null;
   var wasOverModel = false;
   var pointerIsDown = false;
 
@@ -151,9 +153,122 @@
     return null;
   }
 
+  function getManagerCanvas(source, manager, container) {
+    if (source.managerName === 'live2dManager') {
+      var pixi = manager && manager.pixi_app;
+      if (pixi && (pixi.view || pixi.canvas)) return pixi.view || pixi.canvas;
+    }
+
+    if (manager && manager.renderer && manager.renderer.domElement) {
+      return manager.renderer.domElement;
+    }
+
+    return container && container.querySelector
+      ? container.querySelector('canvas')
+      : null;
+  }
+
+  function getLive2DRendererPoint(manager, container, x, y) {
+    var canvas = getManagerCanvas(
+      { managerName: 'live2dManager' },
+      manager,
+      container,
+    );
+    if (!canvas || typeof canvas.getBoundingClientRect !== 'function') return null;
+
+    var rect = canvas.getBoundingClientRect();
+    if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
+    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null;
+
+    var renderer = manager && manager.pixi_app && manager.pixi_app.renderer;
+    var screen = renderer && renderer.screen;
+    var rendererWidth = Number(screen && screen.width);
+    var rendererHeight = Number(screen && screen.height);
+    var scaleX = rendererWidth > 0 ? rendererWidth / rect.width : 1;
+    var scaleY = rendererHeight > 0 ? rendererHeight / rect.height : 1;
+
+    return {
+      x: (x - rect.left) * scaleX,
+      y: (y - rect.top) * scaleY,
+    };
+  }
+
+  function getLive2DInputRegionRects(manager) {
+    if (typeof manager.getModelInputRegionRects !== 'function') return null;
+
+    try {
+      var rects = manager.getModelInputRegionRects({ padding: 8 });
+      if (!Array.isArray(rects)) return null;
+      return rects.map(normalizeBounds).filter(Boolean);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // A precise result is authoritative. Do not widen a precise miss back to
+  // the coarse model bounds, because the native window covers the desktop.
+  function getPreciseManagerHit(source, x, y) {
+    var container = document.getElementById(source.containerId);
+    if (!isElementVisible(container)) return false;
+
+    var manager = window[source.managerName];
+    if (!manager) return null;
+
+    if (source.managerName === 'live2dManager') {
+      var inputRegionRects = getLive2DInputRegionRects(manager);
+      if (inputRegionRects !== null) {
+        return inputRegionRects.some(function(rect) {
+          return pointIsInsideBounds(rect, x, y, 0);
+        });
+      }
+    }
+
+    if (
+      source.managerName === 'live2dManager' &&
+      manager.currentModel &&
+      typeof manager.currentModel.hitTest === 'function'
+    ) {
+
+      var point = getLive2DRendererPoint(manager, container, x, y);
+      if (!point) return false;
+
+      try {
+        var hitAreas = manager.currentModel.hitTest(point.x, point.y);
+        return Array.isArray(hitAreas) ? hitAreas.length > 0 : Boolean(hitAreas);
+      } catch (_) {
+        return false;
+      }
+    }
+
+    if (typeof manager.hitTest === 'function') {
+      try {
+        return Boolean(manager.hitTest(x, y));
+      } catch (_) {
+        return false;
+      }
+    }
+
+    var interaction = manager.interaction;
+    if (interaction && typeof interaction._hitTestModel === 'function') {
+      try {
+        return Boolean(interaction._hitTestModel(x, y));
+      } catch (_) {
+        return false;
+      }
+    }
+
+    return null;
+  }
+
   function isPointOverModel(x, y) {
     var margin = wasOverModel ? MODEL_EXIT_MARGIN : 0;
     for (var index = 0; index < MODEL_SOURCES.length; index += 1) {
+      var preciseHit = getPreciseManagerHit(MODEL_SOURCES[index], x, y);
+      if (preciseHit !== null) {
+        if (preciseHit) return true;
+        continue;
+      }
+
       var bounds = getManagerModelBounds(MODEL_SOURCES[index]);
       if (pointIsInsideBounds(bounds, x, y, margin)) return true;
     }
@@ -161,12 +276,24 @@
   }
 
   function applyIgnoreState(shouldIgnore) {
-    if (shouldIgnore === isIgnoring) return;
-    var previous = isIgnoring;
-    isIgnoring = shouldIgnore;
-    Promise.resolve(invoke('set_click_through', { ignore: shouldIgnore })).catch(function(error) {
-      isIgnoring = previous;
-      console.error('切换 Tauri 鼠标穿透状态失败:', error);
+    desiredIgnore = Boolean(shouldIgnore);
+    if (ignoreTransition || desiredIgnore === isIgnoring) return;
+
+    ignoreTransition = (async function() {
+      while (isIgnoring !== desiredIgnore) {
+        var nextIgnore = desiredIgnore;
+        try {
+          await invoke('set_click_through', { ignore: nextIgnore });
+          isIgnoring = nextIgnore;
+        } catch (error) {
+          console.error('切换 Tauri 鼠标穿透状态失败:', error);
+          desiredIgnore = isIgnoring;
+          break;
+        }
+      }
+    })().finally(function() {
+      ignoreTransition = null;
+      if (isIgnoring !== desiredIgnore) applyIgnoreState(desiredIgnore);
     });
   }
 

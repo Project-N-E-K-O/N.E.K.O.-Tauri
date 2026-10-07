@@ -89,10 +89,8 @@ pub fn run() {
                 if let Err(error) = webview.eval(include_str!("screen_capture.js")) {
                     eprintln!("注入 Tauri 屏幕捕获桥接失败: {error}");
                 }
-                if platform::INJECT_CLICK_THROUGH_BRIDGE {
-                    if let Err(error) = webview.eval(include_str!("click_through.js")) {
-                        eprintln!("注入 Tauri 鼠标命中桥接失败: {error}");
-                    }
+                if let Err(error) = webview.eval(platform::CLICK_THROUGH_BRIDGE) {
+                    eprintln!("注入 Tauri 鼠标命中桥接失败: {error}");
                 }
             }
 

@@ -18,7 +18,7 @@ use webkit2gtk::{
 
 use super::CursorSample;
 
-pub(crate) const INJECT_CLICK_THROUGH_BRIDGE: bool = false;
+pub(crate) const CLICK_THROUGH_BRIDGE: &str = include_str!("../linux_click_through.js");
 
 static INPUT_REGION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static NIRI_FINALIZATION_SCHEDULED: AtomicBool = AtomicBool::new(false);

@@ -8,7 +8,7 @@ use objc::{class, msg_send, sel, sel_impl};
 
 use super::CursorSample;
 
-pub(crate) const INJECT_CLICK_THROUGH_BRIDGE: bool = true;
+pub(crate) const CLICK_THROUGH_BRIDGE: &str = include_str!("../click_through.js");
 const NEKO_INTERACTIVE_WINDOW_LEVEL: i32 = 8;
 
 static WINDOW_PTR: AtomicUsize = AtomicUsize::new(0);

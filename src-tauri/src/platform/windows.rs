@@ -1,6 +1,6 @@
 use super::CursorSample;
 
-pub(crate) const INJECT_CLICK_THROUGH_BRIDGE: bool = true;
+pub(crate) const CLICK_THROUGH_BRIDGE: &str = include_str!("../click_through.js");
 
 pub(crate) fn prepare_process_environment() {}
 

@@ -39,6 +39,8 @@ export default defineConfig(async () => ({
     },
   },
   test: {
+    include: ['src/**/*.{test,spec}.{ts,tsx}', 'scripts/**/*.{test,spec}.mjs'],
+    maxWorkers: 2,
     globals: true,
     environment: "jsdom",
   },

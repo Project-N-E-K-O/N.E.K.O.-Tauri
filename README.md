@@ -85,6 +85,8 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 ```
 
 `npm run check` 会依次执行 TypeScript 类型检查、Tauri 注入桥的 Vitest 测试和 Vite 生产构建。
+Vitest 仅扫描 `src/` 和 `scripts/` 下的项目测试，并限制为最多两个 worker，
+避免将 `.artifacts/` 中的参考仓库或构建产物作为测试执行。
 
 ## 发布构建
 

@@ -16,6 +16,14 @@ Every platform module implements the same small contract: process setup,
 application/window configuration, click-through, cursor sampling, navigation
 handoff and settings-window creation.
 
-Only one front-end hit-test owner may run on a platform. Linux uses the detailed
-`static/live2d-core.js` payload required by XShape. macOS and Windows use the
-injected `click_through.js` bridge.
+Only one front-end hit-test owner runs on a platform. Each platform selects its
+injected `CLICK_THROUGH_BRIDGE`: Linux uses `linux_click_through.js` to submit
+persistent model/UI rectangles to the native input-region implementation;
+macOS and Windows retain `click_through.js` and whole-window mouse ignoring.
+The shared upstream page does not need to implement a Tauri radar listener.
+Linux samples layout twice per second and submits only changed rectangles,
+collecting whole surfaces before controls and skipping already covered areas.
+Each active document permits one IPC request at a time; completions from a
+previous cached-page lifecycle cannot alter the resumed bridge's state.
+Pointer interactions retain input until release. Page hide removes the timer
+and input listeners; cached-page restore resumes exactly one bridge.

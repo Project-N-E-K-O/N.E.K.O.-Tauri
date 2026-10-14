@@ -33,6 +33,7 @@
 
   function start() {
     const generation = ++lifecycleGeneration;
+    const activatedAt = performance.timeOrigin + performance.now();
     disposed = false;
     documentId = 0;
     seen = new Set();
@@ -62,7 +63,7 @@
       const stop = () => { for (const stop of stops) stop(); };
       if (disposed || generation !== lifecycleGeneration) { stop(); throw new Error('Desktop document was disposed'); }
       unlisten = stop;
-      return tauri.core.invoke('desktop_ready', { startedAt: performance.timeOrigin });
+      return tauri.core.invoke('desktop_ready', { startedAt: performance.timeOrigin, activatedAt });
     }).then(result => {
       if (disposed || generation !== lifecycleGeneration) throw new Error('Desktop document was disposed');
       documentId = result.document;

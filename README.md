@@ -112,6 +112,7 @@ npm run tauri:build
 ├── src/                  # 最小启动页与注入桥测试
 ├── src-tauri/
 │   ├── src/platform/     # 各平台窗口、命中区实现
+│   ├── src/desktop/      # 原生窗口角色、生命周期、路由与上游页面桥接
 │   ├── src/screen_capture.rs
 │   ├── src/backend_runtime.rs
 │   └── tauri.conf.json
@@ -119,6 +120,19 @@ npm run tauri:build
 ├── index.html
 └── package.json
 ```
+
+## 独立原生窗口
+
+桌面壳通过 Tauri 创建 Pet、紧凑聊天、完整聊天、毛线球、字幕、字幕设置、
+Agent HUD 和功能子窗口。每个窗口有独立的 WebView 和文档生命周期。
+聊天、字幕与 HUD 继续加载 N.E.K.O 的页面；Pet 持有角色 WebSocket、音频和模型，
+聊天窗口通过桌面消息路由代理角色连接。窗口角色、显示状态、逻辑坐标和布局持久化
+由 Rust 的 `desktop/` 管理，平台输入与定位由 `platform/` 实现。
+
+这部分仍在实现与验收中。Linux X11/KWin 的真实 Tauri/WebKit 测试已覆盖窗口创建、
+聊天切换、历史与非空草稿交接、子窗口复用/关闭和毛线球点击恢复。
+附件、流式回复交接、完整字幕/HUD 交互和跨平台行为仍有待完成验证。
+完整范围与验证记录见 [原生窗口文档](docs/native-windows.md)。
 
 ## 贡献边界
 

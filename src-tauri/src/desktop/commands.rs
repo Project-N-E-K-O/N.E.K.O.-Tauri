@@ -137,7 +137,11 @@ pub(crate) async fn on_main<T: Send + 'static>(
 }
 
 #[tauri::command]
-pub(crate) async fn desktop_ready(window: WebviewWindow, started_at: f64) -> Result<Value, String> {
+pub(crate) async fn desktop_ready(
+    window: WebviewWindow,
+    started_at: f64,
+    activated_at: f64,
+) -> Result<Value, String> {
     let label = window.label().to_owned();
     on_main(window.app_handle().clone(), move |app| {
         let window = app.get_webview_window(&label).ok_or("Window was closed")?;
@@ -155,7 +159,7 @@ pub(crate) async fn desktop_ready(window: WebviewWindow, started_at: f64) -> Res
             {
                 return Err("Page is outside the desktop backend origin".into());
             }
-            let document = state.ready(&label, started_at)?;
+            let document = state.ready(&label, started_at, activated_at)?;
             (
                 document,
                 role,
@@ -580,13 +584,7 @@ pub(super) fn dispatch(
             }
             {
                 let mut state = host.lock()?;
-                state.restore();
-                state.restore_pending = Some(surface.role());
-                if keep_ball {
-                    if let Some(ball) = state.windows.get_mut(WindowRole::ChatBall.label()) {
-                        ball.desired_visible = true;
-                    }
-                }
+                state.begin_restore(keep_ball);
             }
             windows::apply_visibility(app)?;
             chat.emit_to(

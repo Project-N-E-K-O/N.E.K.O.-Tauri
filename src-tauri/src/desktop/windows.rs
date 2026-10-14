@@ -344,39 +344,10 @@ pub(crate) fn watch(window: &WebviewWindow) {
 
 pub(crate) fn apply_visibility(app: &tauri::AppHandle) -> Result<(), String> {
     let host = app.state::<DesktopHost>();
-    let mut state = host.lock()?;
-    let surface = state.layout.chat_surface;
-    let minimized = state.minimized;
-    let restored = state.restore_pending.filter(|target| {
-        state
-            .windows
-            .get(target.label())
-            .is_some_and(|record| record.ready && record.painted)
-    });
-    if restored.is_some() {
-        state.restore_pending = None;
-    }
-    let restoring = state.restore_pending.is_some();
-    let ball_ready = state
-        .windows
-        .get(WindowRole::ChatBall.label())
-        .is_some_and(|record| record.ready && record.painted);
-    let visibility: Vec<_> = state
-        .windows
-        .iter()
-        .map(|(label, record)| {
-            (
-                label.clone(),
-                record.ready
-                    && record.painted
-                    && (record.desired_visible
-                        || (record.role == WindowRole::ChatBall && restoring)
-                        || (minimized && !ball_ready && record.role == surface.role())),
-            )
-        })
-        .collect();
-    drop(state);
-    for (label, visible) in visibility {
+    let plan = host.lock()?.visibility_plan();
+    let surface = plan.surface;
+    let minimized = plan.minimized;
+    for (label, visible) in plan.windows {
         if let Some(window) = app.get_webview_window(&label) {
             let was_visible = window.is_visible().unwrap_or(false);
             if visible {
@@ -408,7 +379,7 @@ pub(crate) fn apply_visibility(app: &tauri::AppHandle) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
         }
     }
-    if restored.is_some() {
+    if plan.restored {
         if let Some(ball) = app.get_webview_window(WindowRole::ChatBall.label()) {
             ball.emit_to(ball.label(), "neko-desktop-restore-ack", surface)
                 .map_err(|error| error.to_string())?;

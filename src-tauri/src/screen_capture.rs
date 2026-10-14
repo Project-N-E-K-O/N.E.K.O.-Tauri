@@ -183,8 +183,7 @@ fn capture_source(source_id: &str, max_width: u32, quality: u8) -> ScreenCapture
         Ok(image) => DynamicImage::ImageRgba8(image),
         Err(error) => return ScreenCaptureFrame::failure(error),
     };
-    encode_frame(image, max_width, quality)
-        .unwrap_or_else(ScreenCaptureFrame::failure)
+    encode_frame(image, max_width, quality).unwrap_or_else(ScreenCaptureFrame::failure)
 }
 
 fn encode_frame(

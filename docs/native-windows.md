@@ -130,3 +130,25 @@ replacement, attachments/live-frame replay, subtitle/HUD/native menu behavior,
 ball recovery, feature-window navigation, platform adapters and the remaining
 acceptance list above still need completion and verification. Latest native
 fixture evidence is in `.artifacts/native-upstream-windows/latest-report.json`.
+
+### Latest lifecycle and native geometry checks
+
+`DesktopState` now owns restore transitions and visibility planning. Cached
+documents register a new activation identity independently of their original
+time origin; the previous activation's document remains invalid. The new Rust
+and transport checks cover cached-page registration, old input rejection,
+scoped listener cleanup/reinstallation, destination readiness, and keeping a
+restore control available while its replacement loads. These checks do not
+establish React restoration readiness; that remains acceptance work.
+
+A fresh isolated Xvfb/KWin native run confirmed an actual 88 × 88 ball window.
+An XTest mouse click hid the ball and restored the compact window at 488 × 102.
+This verifies native carrier size and the click/restore path. Moved anchors,
+reload during restoration, and full-surface restoration remain unverified.
+
+The completed Standards/Spec source review confirmed the visibility ownership
+refactor. Remaining integration work includes sendable composer attachments,
+live response adapter state, blank feature-window/navigation contracts,
+React-ready restore acknowledgement, upstream settings ownership, and moving
+compositor placement policy fully behind the platform interface. These are
+retained as unfinished requirements; passing host tests does not close them.

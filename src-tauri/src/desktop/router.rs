@@ -129,7 +129,14 @@ impl MessageKind {
             SubtitleState => &[Subtitle, SubtitleSettings, CompactChat, FullChat],
             SubtitleSettingsState => &[SubtitleSettings],
             AgentUpdate => &[AgentHud],
-            SettingsState => &[CompactChat, FullChat, Child, Subtitle, SubtitleSettings, AgentHud],
+            SettingsState => &[
+                CompactChat,
+                FullChat,
+                Child,
+                Subtitle,
+                SubtitleSettings,
+                AgentHud,
+            ],
             ChatSnapshot => &[CompactChat, FullChat],
         }
     }

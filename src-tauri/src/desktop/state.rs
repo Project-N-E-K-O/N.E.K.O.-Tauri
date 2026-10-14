@@ -15,6 +15,7 @@ pub(crate) struct WindowRecord {
     pub(crate) desired_visible: bool,
     pub(crate) document: u64,
     pub(crate) started_at: f64,
+    pub(crate) activated_at: f64,
     pub(crate) transient_bounds: Option<Bounds>,
     pub(crate) initial_bounds: Option<Bounds>,
 }
@@ -65,29 +66,43 @@ impl DesktopState {
                 desired_visible: visible,
                 document: 0,
                 started_at: 0.0,
+                activated_at: 0.0,
                 transient_bounds: None,
                 initial_bounds: None,
             },
         );
     }
 
-    pub(crate) fn ready(&mut self, label: &str, started_at: f64) -> Result<u64, String> {
-        if !started_at.is_finite() || started_at <= 0.0 {
+    pub(crate) fn ready(
+        &mut self,
+        label: &str,
+        started_at: f64,
+        activated_at: f64,
+    ) -> Result<u64, String> {
+        if !started_at.is_finite()
+            || started_at <= 0.0
+            || !activated_at.is_finite()
+            || activated_at < started_at
+        {
             return Err("Invalid document identity".into());
         }
         let record = self
             .windows
             .get_mut(label)
             .ok_or("Unmanaged desktop window")?;
-        if started_at < record.started_at {
+        // A cached document has an older time origin but a new activation.
+        // Order activations, so its return is valid while queued IPC from the
+        // previous activation cannot take over the current document.
+        if activated_at < record.activated_at {
             return Err("Obsolete document".into());
         }
-        if started_at == record.started_at && record.ready {
+        if activated_at == record.activated_at && started_at == record.started_at && record.ready {
             return Ok(record.document);
         }
         self.next_document += 1;
         record.document = self.next_document;
         record.started_at = started_at;
+        record.activated_at = activated_at;
         record.ready = true;
         if record.role == WindowRole::Pet {
             self.router.pet_reloaded();
@@ -130,9 +145,57 @@ impl DesktopState {
         }
     }
 
-    pub(crate) fn restore(&mut self) {
+    pub(crate) fn begin_restore(&mut self, keep_ball: bool) {
         self.select_surface(self.layout.chat_surface);
+        self.restore_pending = Some(self.layout.chat_surface.role());
+        if keep_ball {
+            if let Some(ball) = self.windows.get_mut(WindowRole::ChatBall.label()) {
+                ball.desired_visible = true;
+            }
+        }
     }
+
+    pub(crate) fn visibility_plan(&mut self) -> VisibilityPlan {
+        let restored = self.restore_pending.filter(|target| {
+            self.windows
+                .get(target.label())
+                .is_some_and(|record| record.ready && record.painted)
+        });
+        if restored.is_some() {
+            self.restore_pending = None;
+        }
+        let ball_ready = self
+            .windows
+            .get(WindowRole::ChatBall.label())
+            .is_some_and(|record| record.ready && record.painted);
+        let windows = self
+            .windows
+            .iter()
+            .map(|(label, record)| {
+                let visible = record.ready
+                    && record.painted
+                    && (record.desired_visible
+                        || (record.role == WindowRole::ChatBall && self.restore_pending.is_some())
+                        || (self.minimized
+                            && !ball_ready
+                            && record.role == self.layout.chat_surface.role()));
+                (label.clone(), visible)
+            })
+            .collect();
+        VisibilityPlan {
+            windows,
+            restored: restored.is_some(),
+            surface: self.layout.chat_surface,
+            minimized: self.minimized,
+        }
+    }
+}
+
+pub(crate) struct VisibilityPlan {
+    pub(crate) windows: Vec<(String, bool)>,
+    pub(crate) restored: bool,
+    pub(crate) surface: ChatSurface,
+    pub(crate) minimized: bool,
 }
 
 #[cfg(test)]
@@ -145,7 +208,7 @@ mod tests {
         state.register("chat-compact".into(), WindowRole::CompactChat, None, true);
         state.register("chat-full".into(), WindowRole::FullChat, None, false);
         state.select_surface(ChatSurface::Full);
-        state.ready("chat-compact", 10.0).unwrap();
+        state.ready("chat-compact", 10.0, 10.0).unwrap();
         assert!(!state.windows["chat-compact"].desired_visible);
         assert!(state.windows["chat-full"].desired_visible);
     }
@@ -158,7 +221,7 @@ mod tests {
         state.select_surface(ChatSurface::Full);
         state.minimize();
         assert!(state.windows["chat-ball"].desired_visible);
-        state.restore();
+        state.begin_restore(false);
         assert!(state.windows["chat-full"].desired_visible);
         assert!(!state.windows["chat-ball"].desired_visible);
     }
@@ -167,10 +230,55 @@ mod tests {
     fn old_page_completion_cannot_replace_the_current_document() {
         let mut state = DesktopState::new(Layout::default());
         state.register("main".into(), WindowRole::Pet, None, true);
-        let old = state.ready("main", 10.0).unwrap();
-        let current = state.ready("main", 11.0).unwrap();
+        let old = state.ready("main", 10.0, 10.0).unwrap();
+        let current = state.ready("main", 11.0, 11.0).unwrap();
         assert!(state.sender("main", old).is_err());
-        assert!(state.ready("main", 10.0).is_err());
+        assert!(state.ready("main", 10.0, 10.0).is_err());
         assert_eq!(state.sender("main", current).unwrap(), WindowRole::Pet);
+    }
+
+    #[test]
+    fn cached_document_gets_a_new_identity_without_accepting_its_old_activation() {
+        let mut state = DesktopState::new(Layout::default());
+        state.register("child".into(), WindowRole::Child, None, true);
+        let first = state.ready("child", 10.0, 10.1).unwrap();
+        let second = state.ready("child", 11.0, 11.1).unwrap();
+        let restored = state.ready("child", 10.0, 12.0).unwrap();
+        assert!(state.sender("child", first).is_err());
+        assert!(state.sender("child", second).is_err());
+        assert!(state.ready("child", 11.0, 11.1).is_err());
+        assert_eq!(state.sender("child", restored).unwrap(), WindowRole::Child);
+    }
+
+    #[test]
+    fn chat_and_ball_keep_a_visible_restore_control_until_the_destination_is_ready() {
+        let mut state = DesktopState::new(Layout::default());
+        state.register("chat-compact".into(), WindowRole::CompactChat, None, true);
+        state.register("chat-ball".into(), WindowRole::ChatBall, None, false);
+        state.ready("chat-compact", 10.0, 10.0).unwrap();
+        state.windows.get_mut("chat-compact").unwrap().painted = true;
+        state.minimize();
+        let visible = |plan: &VisibilityPlan, label: &str| {
+            plan.windows
+                .iter()
+                .any(|(name, visible)| name == label && *visible)
+        };
+        assert!(visible(&state.visibility_plan(), "chat-compact"));
+        state.ready("chat-ball", 11.0, 11.0).unwrap();
+        state.windows.get_mut("chat-ball").unwrap().painted = true;
+        let plan = state.visibility_plan();
+        assert!(!visible(&plan, "chat-compact"));
+        assert!(visible(&plan, "chat-ball"));
+        state.windows.get_mut("chat-compact").unwrap().ready = false;
+        state.begin_restore(false);
+        let plan = state.visibility_plan();
+        assert!(!plan.restored);
+        assert!(visible(&plan, "chat-ball"));
+        state.ready("chat-compact", 12.0, 12.0).unwrap();
+        let plan = state.visibility_plan();
+        assert!(plan.restored);
+        assert!(visible(&plan, "chat-compact"));
+        assert!(!visible(&plan, "chat-ball"));
+        assert!(!state.visibility_plan().restored);
     }
 }

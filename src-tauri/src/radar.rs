@@ -1,6 +1,6 @@
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, WebviewWindow};
+use tauri::{Emitter, Manager, WebviewWindow};
 
 use crate::platform;
 
@@ -31,6 +31,13 @@ pub(crate) fn start(window: WebviewWindow) {
         let mut active_until = Instant::now();
 
         loop {
+            if window
+                .app_handle()
+                .get_webview_window(window.label())
+                .is_none()
+            {
+                break;
+            }
             let sample = platform::cursor_sample(&window);
             if diagnostics_enabled && last_diagnostic.elapsed() >= Duration::from_millis(500) {
                 match sample {
@@ -58,7 +65,7 @@ pub(crate) fn start(window: WebviewWindow) {
                 }
 
                 if changed || heartbeat_due {
-                    let _ = window.emit("neko_radar_tick", sample.relative);
+                    let _ = window.emit_to(window.label(), "neko_radar_tick", sample.relative);
                     last_cursor = Some(sample.absolute);
                     last_emit = Instant::now();
                 }

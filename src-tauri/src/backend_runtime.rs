@@ -175,7 +175,7 @@ pub(crate) fn wait_for_main_server(window: tauri::WebviewWindow) {
                 }
 
                 if let Ok(url) = tauri::Url::parse(&main_url) {
-                    if let Err(error) = window.navigate(url) {
+                    if let Err(error) = crate::desktop::backend_ready(&window, url) {
                         eprintln!("主服务已就绪，但页面跳转失败: {error}");
                     }
                 }

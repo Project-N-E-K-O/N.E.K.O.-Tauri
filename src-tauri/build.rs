@@ -7,6 +7,9 @@ fn main() {
             "get_screen_capture_capabilities",
             "get_screen_capture_sources",
             "capture_screen_source",
+            "desktop_ready",
+            "desktop_publish",
+            "desktop_window",
         ]),
     ))
     .expect("failed to run Tauri build script");

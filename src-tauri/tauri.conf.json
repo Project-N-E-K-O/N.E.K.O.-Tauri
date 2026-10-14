@@ -12,22 +12,7 @@
   "app": {
     "withGlobalTauri": true,
     "macOSPrivateApi": true,
-    "windows": [
-      {
-        "title": "N.E.K.O",
-        "width": 1920,
-        "height": 1080,
-        "maximized": false,
-        "visible": false,
-        "alwaysOnTop": true,
-        "visibleOnAllWorkspaces": true,
-        "acceptFirstMouse": true,
-        "transparent": true,
-        "backgroundColor": [0, 0, 0, 0],
-        "decorations": false,
-        "shadow": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

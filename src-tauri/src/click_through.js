@@ -207,7 +207,7 @@
     var payload = event && event.payload;
     if (!Array.isArray(payload) || payload.length < 2) return;
     handleRadarPoint(Number(payload[0]), Number(payload[1]));
-  }).catch(function(error) {
+  }, { target: window.__NEKO_DESKTOP__ ? window.__NEKO_DESKTOP__.profile.label : 'main' }).catch(function(error) {
     console.error('监听 Tauri 鼠标雷达失败:', error);
   });
 

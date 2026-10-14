@@ -2,13 +2,16 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": ["main", "chat-ball"],
   "permissions": [
     "core:default",
     "allow-set-click-through",
     "allow-open-new-window",
     "allow-get-screen-capture-capabilities",
     "allow-get-screen-capture-sources",
-    "allow-capture-screen-source"
+    "allow-capture-screen-source",
+    "allow-desktop-ready",
+    "allow-desktop-publish",
+    "allow-desktop-window"
   ]
 }

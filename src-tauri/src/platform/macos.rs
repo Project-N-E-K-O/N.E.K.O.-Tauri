@@ -175,21 +175,6 @@ pub(crate) fn cursor_sample(window: &tauri::WebviewWindow) -> Option<CursorSampl
     })
 }
 
-pub(crate) fn open_settings_window(
-    app: &tauri::AppHandle,
-    url: tauri::Url,
-    label: String,
-) -> Result<(), String> {
-    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::External(url))
-        .title("设置面板")
-        .inner_size(900.0, 700.0)
-        .transparent(false)
-        .decorations(true)
-        .build()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{validated_desktop_bounds, DesktopBounds};

@@ -14,7 +14,8 @@ selected by `platform/mod.rs` at compile time:
 
 Every platform module implements the same small contract: process setup,
 application/window configuration, click-through, cursor sampling, navigation
-handoff and settings-window creation.
+handoff. The desktop module owns child/satellite window creation; the platform
+module configures their native behavior without sharing Pet input state.
 
 Only one front-end hit-test owner runs on a platform. Each platform selects its
 injected `CLICK_THROUGH_BRIDGE`: Linux uses `linux_click_through.js` to submit

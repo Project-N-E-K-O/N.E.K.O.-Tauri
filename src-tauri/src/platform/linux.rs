@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
@@ -10,7 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gtk::glib::translate::ToGlibPtr;
 use gtk::prelude::*;
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use tauri::Manager;
 use webkit2gtk::{
     DeviceInfoPermissionRequest, PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
     WebViewExt,
@@ -26,6 +26,8 @@ static NIRI_LAYER_SHELL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static NIRI_INPUT_REGION_READY: AtomicBool = AtomicBool::new(false);
 static NIRI_PENDING_INPUT_REGION: Mutex<Option<PendingInputRegion>> = Mutex::new(None);
 static NIRI_DIAGNOSTIC_LAST_SURFACE_ID: AtomicU32 = AtomicU32::new(0);
+static SATELLITE_INPUT_REGIONS: Mutex<Option<HashMap<String, Vec<InputRectangle>>>> =
+    Mutex::new(None);
 
 const STATIC_INPUT_REGION_ENV: &str = "NEKO_X11_STATIC_INPUT_REGION";
 const INPUT_REGION_DIAGNOSTIC_ENV: &str = "NEKO_TAURI_INPUT_REGION_DIAGNOSTIC";
@@ -421,6 +423,9 @@ fn configure_media_permissions(window: &tauri::WebviewWindow) -> Result<(), Stri
 
             if let Some(settings) = WebViewExt::settings(&webview) {
                 settings.set_enable_media_stream(true);
+                if std::env::var_os("NEKO_TAURI_BRIDGE_DIAGNOSTIC").is_some() {
+                    settings.set_enable_write_console_messages_to_stdout(true);
+                }
                 settings.set_enable_webrtc(true);
             }
 
@@ -1152,8 +1157,8 @@ fn apply_native_wayland_input_rectangles(
                 .map(|index| gdk_region.rectangle(index))
                 .map(|rectangle| i64::from(rectangle.width()) * i64::from(rectangle.height()))
                 .sum();
-            let mut extents = gdk::cairo::RectangleInt::new(0, 0, 0, 0);
-            gdk_region.extents(&mut extents);
+            let extents = gdk::cairo::RectangleInt::new(0, 0, 0, 0);
+            gdk_region.extents(&extents);
             let coverage_percent = union_area as f64 * 100.0 / window_area as f64;
 
             println!(
@@ -1441,28 +1446,91 @@ pub(crate) fn cursor_sample(window: &tauri::WebviewWindow) -> Option<CursorSampl
     })
 }
 
-pub(crate) fn open_settings_window(
-    app: &tauri::AppHandle,
-    url: tauri::Url,
-    label: String,
+pub(super) fn configure_auxiliary_window_impl(window: &tauri::WebviewWindow) -> Result<(), String> {
+    configure_media_permissions(window)?;
+    let gtk_window = window.gtk_window().map_err(|error| error.to_string())?;
+    gtk_window.set_type_hint(gdk::WindowTypeHint::Normal);
+    window
+        .with_webview(|view| view.inner().set_size_request(1, 1))
+        .map_err(|error| error.to_string())?;
+    let label = window.label().to_owned();
+    gtk_window.connect_map_event(move |window, _| {
+        let rectangles = SATELLITE_INPUT_REGIONS.lock().ok().and_then(|regions| {
+            regions
+                .as_ref()
+                .and_then(|regions| regions.get(&label).cloned())
+        });
+        if let Some(rectangles) = rectangles {
+            let result = if uses_native_wayland_backend() {
+                apply_native_wayland_input_rectangles(window, &rectangles)
+            } else {
+                apply_input_rectangles(window, &rectangles)
+            };
+            if let Err(error) = result {
+                eprintln!("Restoring satellite input region failed: {error}");
+            }
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    let label = window.label().to_owned();
+    gtk_window.connect_destroy(move |_| {
+        if let Ok(mut regions) = SATELLITE_INPUT_REGIONS.lock() {
+            if let Some(regions) = regions.as_mut() {
+                regions.remove(&label);
+            }
+        }
+    });
+    Ok(())
+}
+
+pub(super) fn set_auxiliary_click_through_impl(
+    window: &tauri::Window,
+    ignore: bool,
+    details: &str,
 ) -> Result<(), String> {
-    let builder = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::External(url))
-        .title("设置面板")
-        .inner_size(900.0, 700.0)
-        .transparent(false)
-        .decorations(true)
-        .always_on_top(true);
-
-    let builder = if let Some(parent) = app.get_webview_window("main") {
-        builder
-            .transient_for(&parent)
-            .map_err(|error| format!("无法将设置面板关联到主覆盖层: {error}"))?
-    } else {
-        builder
-    };
-
-    let window = builder.build().map_err(|error| error.to_string())?;
-    configure_media_permissions(&window)
+    let rectangles = pointer_input_rectangles(true, "satellite-regions", details);
+    let handle = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let result = handle
+                .gtk_window()
+                .map_err(|error| error.to_string())
+                .and_then(|gtk_window| {
+                    let rectangles = if ignore {
+                        rectangles
+                    } else {
+                        let size = handle.inner_size().map_err(|error| error.to_string())?;
+                        let scale = if uses_native_wayland_backend() {
+                            handle.scale_factor().unwrap_or(1.0)
+                        } else {
+                            1.0
+                        };
+                        vec![InputRectangle {
+                            x: 0,
+                            y: 0,
+                            width: (f64::from(size.width) / scale).ceil() as i32,
+                            height: (f64::from(size.height) / scale).ceil() as i32,
+                        }]
+                    };
+                    if let Ok(mut regions) = SATELLITE_INPUT_REGIONS.lock() {
+                        regions
+                            .get_or_insert_with(HashMap::new)
+                            .insert(handle.label().to_owned(), rectangles.clone());
+                    }
+                    if gtk_window.window().is_none() {
+                        return Ok((0, 0, rectangles));
+                    }
+                    if uses_native_wayland_backend() {
+                        apply_native_wayland_input_rectangles(&gtk_window, &rectangles)
+                    } else {
+                        apply_input_rectangles(&gtk_window, &rectangles)
+                    }
+                });
+            if let Err(error) = result {
+                eprintln!("Applying satellite input region failed: {error}");
+            }
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

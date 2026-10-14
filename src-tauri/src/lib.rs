@@ -1,4 +1,5 @@
 mod backend_runtime;
+mod desktop;
 mod platform;
 mod radar;
 mod screen_capture;
@@ -55,7 +56,12 @@ fn set_click_through(
         details.len()
     );
 
-    platform::set_click_through(&window, ignore, &reason, &details).map_err(|error| {
+    let result = if window.label() == "main" {
+        platform::set_click_through(&window, ignore, &reason, &details)
+    } else {
+        platform::set_auxiliary_click_through(&window, ignore, &details)
+    };
+    result.map_err(|error| {
         let message = format!(
             "[ClickThrough] 应用失败: window={window_label} ignore={ignore} reason={reason} error={error}"
         );
@@ -68,11 +74,16 @@ fn set_click_through(
 }
 
 #[tauri::command]
-fn open_new_window(app: tauri::AppHandle, url: String, label: String) -> Result<(), String> {
-    let parsed_url = url
-        .parse()
-        .map_err(|error| format!("设置面板 URL 无效: {error}"))?;
-    platform::open_settings_window(&app, parsed_url, label)
+async fn open_new_window(
+    window: tauri::WebviewWindow,
+    url: String,
+    label: String,
+) -> Result<(), String> {
+    let parent = window.label().to_owned();
+    desktop::commands::on_main(window.app_handle().clone(), move |app| {
+        desktop::open_child(app, &parent, &url, Some(&label)).map(|_| ())
+    })
+    .await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -81,6 +92,13 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .on_page_load(|webview, payload| {
+            if let Some(window) = webview.app_handle().get_webview_window(webview.label()) {
+                if let Err(error) =
+                    desktop::page_loaded(&window, payload.event() == PageLoadEvent::Finished)
+                {
+                    eprintln!("Desktop page lifecycle failed: {error}");
+                }
+            }
             if !should_reveal_main_window(webview.label(), payload.event()) {
                 return;
             }
@@ -108,13 +126,14 @@ pub fn run() {
             open_new_window,
             screen_capture::get_screen_capture_capabilities,
             screen_capture::get_screen_capture_sources,
-            screen_capture::capture_screen_source
+            screen_capture::capture_screen_source,
+            desktop::commands::desktop_ready,
+            desktop::commands::desktop_publish,
+            desktop::commands::desktop_window
         ])
         .setup(|app| {
             platform::configure_app(app);
-            let window = app
-                .get_webview_window("main")
-                .ok_or_else(|| "Tauri 主窗口不存在".to_string())?;
+            let window = desktop::create_main(app)?;
 
             platform::configure_main_window(app, &window)?;
             platform::startup_input_region(&window)?;
@@ -130,6 +149,7 @@ pub fn run() {
 
     builder.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
+            desktop::exiting(app_handle);
             if let Some(state) = app_handle.try_state::<backend_runtime::BackendProcess>() {
                 backend_runtime::terminate(&state);
             }

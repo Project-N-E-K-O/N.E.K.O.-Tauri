@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/remote-schema.json",
   "identifier": "local-backend",
   "description": "Allow the embedded N.E.K.O backend UI to receive cursor radar events and control its own desktop window.",
-  "windows": ["main"],
+  "windows": ["main", "chat-compact", "chat-full", "subtitle", "subtitle-settings", "agent-hud", "child-*"],
   "local": false,
   "remote": {
     "urls": ["http://127.0.0.1:48911/*"]
@@ -14,6 +14,9 @@
     "allow-open-new-window",
     "allow-get-screen-capture-capabilities",
     "allow-get-screen-capture-sources",
-    "allow-capture-screen-source"
+    "allow-capture-screen-source",
+    "allow-desktop-ready",
+    "allow-desktop-publish",
+    "allow-desktop-window"
   ]
 }

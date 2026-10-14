@@ -1,10 +1,17 @@
 import { defineConfig } from "vitest/config";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(async () => ({
   clearScreen: false,
+  build: {
+    rollupOptions: { input: {
+      startup: fileURLToPath(new URL('./index.html', import.meta.url)),
+      ball: fileURLToPath(new URL('./ball.html', import.meta.url)),
+    } },
+  },
   server: {
     port: 1420,
     strictPort: true,

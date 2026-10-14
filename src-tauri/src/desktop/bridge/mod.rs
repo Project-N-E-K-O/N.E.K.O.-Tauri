@@ -9,6 +9,8 @@ pub(crate) fn initialization_script(role: WindowRole, label: &str, parent: Optio
         include_str!("settings.js"),
         include_str!("pet.js"),
         include_str!("input.js"),
+        include_str!("composer.js"),
+        include_str!("response-state.js"),
         include_str!("chat.js"),
         include_str!("compact-layout.js"),
         include_str!("panels.js"),

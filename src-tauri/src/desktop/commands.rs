@@ -21,6 +21,9 @@ pub(crate) enum WindowRequest {
     Displays,
     Cursor,
     Painted,
+    ContentReady {
+        through_snapshot: u64,
+    },
     WindowMenu,
     SubtitleSettings {
         visible: bool,
@@ -160,6 +163,16 @@ pub(crate) async fn desktop_ready(
                 return Err("Page is outside the desktop backend origin".into());
             }
             let document = state.ready(&label, started_at, activated_at)?;
+            if role.is_chat() {
+                let sequence = state
+                    .router
+                    .replay(role)
+                    .iter()
+                    .find(|delivery| delivery.kind == super::router::MessageKind::ChatSnapshot)
+                    .map(|delivery| delivery.sequence)
+                    .unwrap_or(0);
+                state.require_snapshot(&label, sequence)?;
+            }
             (
                 document,
                 role,
@@ -204,18 +217,26 @@ pub(crate) async fn desktop_publish(window: WebviewWindow, message: Message) -> 
         }
         state.router.publish(role, message)?
     };
-    let receivers: Vec<_> = app
-        .state::<DesktopHost>()
-        .lock()?
-        .windows
-        .iter()
-        .filter(|(label, record)| {
-            label.as_str() != window.label()
-                && record.ready
-                && delivery.kind.targets().contains(&record.role)
-        })
-        .map(|(label, _)| label.clone())
-        .collect();
+    let receivers: Vec<_> = {
+        let host = app.state::<DesktopHost>();
+        let mut state = host.lock()?;
+        let labels: Vec<_> = state
+            .windows
+            .iter()
+            .filter(|(label, record)| {
+                label.as_str() != window.label()
+                    && record.ready
+                    && delivery.kind.targets().contains(&record.role)
+            })
+            .map(|(label, _)| label.clone())
+            .collect();
+        if delivery.kind == super::router::MessageKind::ChatSnapshot {
+            for label in &labels {
+                state.require_snapshot(label, delivery.sequence)?;
+            }
+        }
+        labels
+    };
     for label in receivers {
         if let Some(receiver) = app.get_webview_window(&label) {
             receiver
@@ -310,6 +331,18 @@ pub(super) fn dispatch(
                 .painted = true;
             windows::apply_visibility(app)?;
             Ok(Value::Null)
+        }
+        WindowRequest::ContentReady { through_snapshot } => {
+            if !role.is_chat() {
+                return Err("Only chat surfaces report content readiness".into());
+            }
+            let accepted = host
+                .lock()?
+                .content_ready(window.label(), through_snapshot)?;
+            if accepted {
+                windows::apply_visibility(app)?;
+            }
+            Ok(json!({"accepted":accepted}))
         }
         WindowRequest::WindowMenu => {
             if role != WindowRole::Pet && !role.is_chat() {

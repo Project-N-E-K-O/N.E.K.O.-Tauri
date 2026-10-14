@@ -116,9 +116,10 @@
   }
   host.on('socket-message', message => {
     if (stale(message) || lifecycle?.kind !== 'session-ready') return;
-    frames.push(message);
-    if (frames.length > 256) frames.shift();
     const deliver = () => {
+      if (stale(message)) return;
+      frames.push(message);
+      if (frames.length > 256) frames.shift();
       host.characterSequence = message.sequence || host.characterSequence || 0;
       for (const proxy of proxies) proxy.message(message);
     };

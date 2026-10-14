@@ -102,6 +102,21 @@ describe('desktop character socket ownership', () => {
     }
   });
 
+  it('does not replay a held frame before the pending chat snapshot is restored', async () => {
+    const chat = page('full-chat');
+    const held: Array<() => void> = [];
+    (chat.w as any).__NEKO_DESKTOP__.deferChatFrame = (_message: unknown, deliver: () => void) => held.push(deliver);
+    chat.deliver('session-ready', {});
+    chat.deliver('socket-message', '{"type":"gemini_response","text":"after snapshot"}');
+    const proxy = new chat.w.WebSocket('ws://127.0.0.1:48911/ws/cat');
+    const frames: string[] = [];
+    proxy.onmessage = event => frames.push(String(event.data));
+    await new Promise(resolve => chat.w.setTimeout(resolve, 10));
+    expect(frames).toEqual([]);
+    held[0]();
+    expect(frames).toEqual(['{"type":"gemini_response","text":"after snapshot"}']);
+  });
+
   it('ignores a close from the previous Pet document epoch', () => {
     const chat = page('compact-chat');
     const socket = new chat.w.WebSocket('ws://127.0.0.1:48911/ws/cat');

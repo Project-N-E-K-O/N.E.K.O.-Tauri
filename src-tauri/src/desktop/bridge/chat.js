@@ -12,11 +12,13 @@
   let lastSnapshot = '';
   let observer = null;
   let draft = '';
-  let draftOverride = null;
-  let draftRevision = 0;
-  let clearDraftRevision = 0;
-  const renderers = new WeakSet();
   let heldFrames = [];
+  let contentReady = false;
+  let replayReady = false;
+  let pendingSnapshotSequence = 0;
+  let restoredSnapshotSequence = 0;
+  let restoreGeneration = 0;
+  let changingPresentation = false;
 
   function event(name, data) { window.dispatchEvent(new CustomEvent(name, { detail: data })); }
   function config(data) {
@@ -44,9 +46,12 @@
     return document.querySelector('#react-chat-window-root textarea, #react-chat-window-root input[type="text"]');
   }
   function snapshot() {
+    const responseState = host.responseTransfer?.capture();
     const state = window.reactChatWindowHost?.getState?.();
-    if (!state?.mounted || pendingSnapshot) return null;
-    return { messages: state.messages || [], composerAttachments: state.composerAttachments || [],
+    const attachments = host.composerTransfer?.capture();
+    if (!state?.mounted || restoring || pendingSnapshot || !attachments || !responseState) return null;
+    return { messages: state.messages || [], composerAttachments: attachments,
+      responseState,
       composerHidden: state.composerHiddenRequested, draft, surface: ownSurface,
       throughSequence: host.characterSequence || 0 };
   }
@@ -58,73 +63,76 @@
     return publish('chat-snapshot', data).then(() => { lastSnapshot = serialized; });
   }
   host.prepareChatSnapshot = shareSnapshot;
-  function restoreSnapshot() {
+  async function restoreSnapshot() {
     const page = window.reactChatWindowHost;
-    if (!pendingSnapshot || !page?.getState?.().mounted) return;
+    if (restoring || !pendingSnapshot || !page?.getState?.().mounted || !host.composerTransfer?.available() ||
+        !host.responseTransfer?.available()) return;
     restoring = true;
+    const generation = restoreGeneration;
     const data = pendingSnapshot;
     pendingSnapshot = null;
-    if (typeof data.draft === 'string') {
-      if (draft && !data.draft) clearDraftRevision = draftRevision + 1;
-      draft = data.draft;
-      draftOverride = data.draft;
-      draftRevision += 1;
+    const sequence = pendingSnapshotSequence;
+    if (typeof data.draft === 'string') draft = data.draft;
+    const restoreResponse = (data.throughSequence || 0) >= (host.characterSequence || 0);
+    if (restoreResponse) {
+      page.setMessages?.(data.messages || []);
+      host.characterSequence = data.throughSequence || 0;
     }
-    installDraftAdapter();
-    if ((data.throughSequence || 0) >= (host.characterSequence || 0)) page.setMessages?.(data.messages || []);
-    page.setComposerAttachments?.(data.composerAttachments || []);
+    host.composerTransfer.restore(data.composerAttachments || []);
     page.setComposerHidden?.(!!data.composerHidden);
-    const input = composer();
-    if (input && typeof data.draft === 'string') {
-      // Use the browser's value setter so React's value tracker observes the
-      // input event exactly as it does for user typing.
-      const prototype = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(prototype, 'value').set.call(input, data.draft);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+    try {
+      await host.responseTransfer.restore(data.responseState, data.draft, restoreResponse);
+    } catch (error) {
+      if (generation === restoreGeneration) {
+        restoring = false;
+        if (!pendingSnapshot) { pendingSnapshot = data; pendingSnapshotSequence = sequence; }
+      }
+      throw error;
     }
+    if (generation !== restoreGeneration || stopped) return;
     restoring = false;
+    restoredSnapshotSequence = sequence;
+    if (pendingSnapshot) { fire(restoreSnapshot()); return; }
     const frames = heldFrames;
     heldFrames = [];
     for (const [message, deliver] of frames) {
       if (message.sequence > (data.throughSequence || 0)) deliver();
     }
+    resizeToContent();
   }
   host.deferChatFrame = (message, deliver) => {
-    if (!pendingSnapshot) { deliver(); return; }
+    if (!pendingSnapshot && !restoring) { deliver(); return; }
     heldFrames.push([message, deliver]);
     if (heldFrames.length > 256) heldFrames.shift();
   };
-  function installDraftAdapter() {
-    const renderer = window.NekoChatWindow;
-    if (!renderer) return;
-    for (const name of ['mount', 'mountChatWindow']) {
-      const original = renderer[name];
-      if (typeof original !== 'function' || renderers.has(original)) continue;
-      function mount(root, props) {
-        // rollbackDraft restores text through the shared renderer contract.
-        // Its empty-string case intentionally does nothing; reset that inactive
-        // React surface once, then mount the complete host props again.
-        if (clearDraftRevision && clearDraftRevision === draftRevision) {
-          renderer.unmountChatWindow(root);
-          clearDraftRevision = 0;
-        }
-        const next = draftOverride === null ? props : { ...props,
-          rollbackDraft: draftOverride, _rollbackKey: 'tauri-draft-' + draftRevision };
-        return original.call(this, root, next);
-      }
-      renderers.add(mount);
-      renderer[name] = mount;
-    }
-  }
-  on('chat-snapshot', message => { pendingSnapshot = message.data; restoreSnapshot(); });
+  on('chat-snapshot', message => {
+    contentReady = false;
+    pendingSnapshotSequence = message.sequence || 0;
+    pendingSnapshot = message.data;
+    fire(restoreSnapshot());
+  });
   on('surface-visibility', message => { active = !!message.data.visible && !message.data.minimized; });
-  on('document-ready', message => { active = !!message.data.visible; });
+  on('document-ready', message => {
+    active = !!message.data.visible;
+    contentReady = false;
+    replayReady = false;
+    pendingSnapshot = null;
+    pendingSnapshotSequence = 0;
+    restoredSnapshotSequence = 0;
+    restoreGeneration += 1;
+    restoring = false;
+    // Transport queues its replay after document-ready consumers return.
+    queueMicrotask(() => queueMicrotask(() => { replayReady = true; resizeToContent(); }));
+  });
 
   let surfaceTransition = Promise.resolve();
   function changeSurface(mode) {
-    if (restoring || stopped || !active) return;
-    surfaceTransition = surfaceTransition.then(async () => {
+    if (restoring || changingPresentation || stopped || !active) return;
+    const generation = restoreGeneration;
+    surfaceTransition = surfaceTransition.catch(() => {}).then(async () => {
+      if (generation !== restoreGeneration || stopped) return;
       await shareSnapshot();
+      if (generation !== restoreGeneration || stopped) return;
       if (mode === 'minimized') return request('collapse', { bounds: null });
       if (mode !== ownSurface && ['compact', 'full'].includes(mode)) return request('select-surface', { surface: mode });
     });
@@ -132,11 +140,22 @@
   }
   window.addEventListener('react-chat-window:chat-surface-mode-change', event => changeSurface(event.detail?.mode));
   on('chat-restored', () => {
-    restoring = true;
+    changingPresentation = true;
+    contentReady = false;
     const page = window.reactChatWindowHost;
     page?.setChatSurfaceMode?.(ownSurface);
     page?.openWindow?.();
-    restoring = false;
+    changingPresentation = false;
+    if (!pendingSnapshot && !restoring) {
+      pendingSnapshot = snapshot();
+      pendingSnapshotSequence = restoredSnapshotSequence;
+    }
+    fire(restoreSnapshot());
+  });
+
+  window.addEventListener('react-chat-window:composer-rollback', event => {
+    if (typeof event.detail?.text === 'string') draft = event.detail.text;
+    if (active) fire(shareSnapshot());
   });
 
   const send = window.WebSocket.prototype.send;
@@ -149,7 +168,6 @@
       const frame = JSON.parse(data);
       userInput = frame?.action === 'stream_data' && frame.input_type === 'text';
       if (active && userInput) draft = '';
-      if (active && userInput) draftOverride = null;
     } catch (_) {}
     if (active && userInput) queueMicrotask(() => fire(shareSnapshot()));
     return result;
@@ -157,8 +175,17 @@
 
   function resizeToContent() {
     if (stopped) return;
-    restoreSnapshot();
-    installDraftAdapter();
+    fire(restoreSnapshot());
+    if (replayReady && !restoring && !contentReady && !pendingSnapshot && host.composerTransfer?.available() &&
+        host.responseTransfer?.available() &&
+        window.reactChatWindowHost?.getState?.().mounted &&
+        document.querySelector('#react-chat-window-root .chat-window')) {
+      contentReady = true;
+      const sequence = restoredSnapshotSequence;
+      fire(request('content-ready', { throughSnapshot: sequence })
+        .then(result => { if (result?.accepted === false && sequence === restoredSnapshotSequence) contentReady = false; })
+        .catch(error => { contentReady = false; throw error; }));
+    }
     if (active && !restoring) fire(shareSnapshot());
   }
 
@@ -169,13 +196,15 @@
     window.addEventListener('input', event => {
       if (event.target !== composer()) return;
       draft = event.target.value;
-      if (!restoring) draftOverride = null;
       if (active && !restoring) fire(shareSnapshot());
     }, true);
     observer = new MutationObserver(resizeToContent);
     observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
     layoutTimer = setInterval(resizeToContent, 500);
-    window.addEventListener('pagehide', () => { stopped = true; observer.disconnect(); clearInterval(layoutTimer); });
+    window.addEventListener('pagehide', () => {
+      stopped = true; restoreGeneration += 1; heldFrames = [];
+      observer.disconnect(); clearInterval(layoutTimer);
+    });
     resizeToContent();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initializeDocument, { once: true });

@@ -8,6 +8,7 @@ asset and window template is read from that checkout, never vendored here.
 import argparse
 import asyncio
 import json
+import uuid
 from pathlib import Path
 
 from aiohttp import web
@@ -28,6 +29,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
 
 DRIVER = r"""<script>
 document.addEventListener('DOMContentLoaded',async()=>{
+ if(window.__NEKO_FIXTURE_CLIENT__==='browser')return;
  const host=window.__NEKO_DESKTOP__;
  if(!host)return;
  const role=host.profile.role;
@@ -37,7 +39,10 @@ document.addEventListener('DOMContentLoaded',async()=>{
   const state=page?.getState?.();
   const geometry=window.__nekoGetCompactInteractionGeometry?.();
   return {ready:true,mounted:!!state?.mounted,mode:state?.chatSurfaceMode,
+   document:(await host.ready).document,updatedAt:Date.now(),
    messages:state?.messages,draft:document.querySelector('#react-chat-window-root textarea')?.value,
+   pendingAttachments:window.appButtons?.getPendingComposerAttachments?.(),
+   responseState:host.responseTransfer?.capture?.(),
    geometry,bounds:await host.request('bounds')};
  }
  await host.ready;
@@ -47,9 +52,16 @@ document.addEventListener('DOMContentLoaded',async()=>{
    for(const command of commands){
     let result;
     if(command.kind==='native')result=await host.request(command.action,command.options||{});
-    else if(command.kind==='mode')result=window.reactChatWindowHost.setChatSurfaceMode(command.mode);
+    else if(command.kind==='mode')result=await window.nekoDesktopWindows.selectChatSurface(command.mode);
     else if(command.kind==='input')result=window.reactChatWindowHost.setCompactChatState('input');
     else if(command.kind==='messages')result=window.reactChatWindowHost.setMessages(command.messages);
+    else if(command.kind==='attachment'){
+     const url=await window.appButtons.normalizeImageDataUrlForPendingList(command.url);
+     window.appButtons.addScreenshotToList(url,command.position,{source:command.source,alt:command.alt});
+     result=host.composerTransfer.capture();
+    }
+    else if(command.kind==='send')result=await window.appButtons.sendTextPayload(command.text,{source:'react-chat-window',requestId:command.requestId});
+    else if(command.kind==='merge-setting')result=(window.mergeMessagesEnabled=command.enabled);
     else if(command.kind==='draft'){
      const input=document.querySelector('#react-chat-window-root textarea');
      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,command.text);
@@ -67,24 +79,34 @@ document.addEventListener('DOMContentLoaded',async()=>{
 def create_app(upstream: Path):
     templates = Environment(loader=FileSystemLoader(upstream))
     app = web.Application()
-    state = {"requests": [], "received": [], "connections": 0, "report": {}, "commands": {}, "results": {}}
+    state = {"runId":uuid.uuid4().hex,"requests": [], "received": [], "connections": 0,
+             "activeConnections":0,"report": {}, "commands": {}, "results": {}}
+    sockets = set()
 
     async def socket(request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         state["connections"] += 1
-        async for message in ws:
-            if message.type != web.WSMsgType.TEXT:
-                continue
-            data = json.loads(message.data)
-            state["received"].append(data)
-            if data.get("action") == "start_session":
-                await ws.send_json({"type": "session_started", "input_mode": data.get("input_type", "text")})
-            elif data.get("action") == "stream_data" and data.get("input_type") == "text":
-                await ws.send_json({"type": "gemini_response", "isNewMessage": True, "text": "A shared response."})
-                await ws.send_json({"type": "system", "data": "turn end"})
-            elif data.get("action") == "ping":
-                await ws.send_json({"type": "pong"})
+        sockets.add(ws)
+        state["activeConnections"] = len(sockets)
+        try:
+            async for message in ws:
+                if message.type != web.WSMsgType.TEXT:
+                    continue
+                data = json.loads(message.data)
+                state["received"].append(data)
+                del state["received"][:-256]
+                if data.get("action") == "start_session":
+                    await ws.send_json({"type": "session_started", "input_mode": data.get("input_type", "text"),
+                                        "request_id":data.get("request_id")})
+                elif data.get("action") == "stream_data" and data.get("input_type") == "text":
+                    await ws.send_json({"type": "gemini_response", "isNewMessage": True, "text": "A shared response."})
+                    await ws.send_json({"type": "system", "data": "turn end"})
+                elif data.get("action") == "ping":
+                    await ws.send_json({"type": "pong"})
+        finally:
+            sockets.discard(ws)
+            state["activeConnections"] = len(sockets)
         return ws
 
     async def static(request):
@@ -96,6 +118,12 @@ def create_app(upstream: Path):
     async def endpoint(request):
         path = request.path
         state["requests"].append(path)
+        del state["requests"][:-512]
+        if path == "/__fixture/frame" and request.method == "POST":
+            frame=await request.json()
+            for ws in list(sockets):
+                await ws.send_json(frame)
+            return web.json_response({"receivers":len(sockets)})
         if path == "/health":
             return web.json_response({"app": "N.E.K.O", "service": "main"})
         if path == "/__fixture/report":

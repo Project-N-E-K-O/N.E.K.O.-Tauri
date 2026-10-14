@@ -152,3 +152,61 @@ live response adapter state, blank feature-window/navigation contracts,
 React-ready restore acknowledgement, upstream settings ownership, and moving
 compositor placement policy fully behind the platform interface. These are
 retained as unfinished requirements; passing host tests does not close them.
+
+### Chat handoff and moved-anchor verification
+
+The shared conversation transfer contract is now implemented in N.E.K.O on
+`codex/desktop-chat-transfer`, now commit
+`4969b5b3c29a1ad13cf8de114a233c9f4c76f773`, rebased onto upstream
+`8a655ac` (the intervening changes did not alter these chat modules). Draft PR:
+[N.E.K.O #3436](https://github.com/Project-N-E-K-O/N.E.K.O/pull/3436). The Tauri
+provider requires that contract: `appChat.captureDesktopState` /
+`restoreDesktopState` and the shared composer's committed-restore callback.
+This dependency is not yet merged or present in the original upstream baseline.
+The provider transports opaque runtime data; queue/ref ownership and pending
+rollback state stay upstream. It no longer wraps React mounting, rebuilds
+virtual references, or remounts the composer to clear a draft.
+
+Readiness now belongs to a specific snapshot sequence. A previously mounted
+sibling is invalidated for each new handoff; an obsolete acknowledgement cannot
+reveal it. Socket frames wait while the shared interface restores and commits
+the composer. Cached-document generations invalidate obsolete completions.
+
+The actual upstream browser probe passed compact/full rendering, non-empty and
+empty draft replacement, restored attachment removal and sending with metadata,
+same-bubble merge-stream continuation, and compact Enter submission followed by
+`RESPONSE_TOO_LONG` rollback in full. Shared React checks cover unchanged empty
+and unchanged non-empty drafts as well as key deduplication and ordinary
+rollback on both surfaces. All 287 App tests passed; the shared bundle builds.
+
+The fresh isolated native probe passed five checks in Tauri/WebKit with KWin:
+
+1. Draft, attachment, history and live merge response survived compact → full.
+2. Both chat windows used exactly one real character WebSocket owned by Pet.
+3. The restored image was sent with a fresh request ID, exact payload, source
+   and avatar-position metadata; historical fixture frames cannot satisfy it.
+4. An actual 88 × 88 ball moved to `(250, 800)` restored the selected full window
+   at `(250, 248)` with size `640 × 640`.
+5. Native exit succeeded and the fixture observed character-socket teardown.
+
+Evidence: `.artifacts/upstream-window-probe/report.json` and
+`.artifacts/native-transfer-probe/report.json` (`passed: true`). Browser fixture
+control is disabled during browser probes so it cannot consume native commands.
+The fixture bounds its trace history and reports live connection counts plus
+document timestamps. The native probe owns an isolated process/X11 display and
+returns nonzero on failure.
+
+Latest checks: `npm run check` (36 tests, typecheck/build), `cargo test` (29 tests),
+`cargo clippy --all-targets -- -D warnings`, and formatting/diff checks passed.
+Both source-review axes found no remaining issue in this focused handoff delta.
+This does not close the full acceptance list: overlapping restores, reload
+during restoration, realistic/structured stream variants, complete panels,
+feature-window contracts, settings ownership and platform behavior remain open.
+
+To reproduce, serve a built N.E.K.O checkout containing the transfer contract
+with `scripts/upstream-window-fixture.py --upstream /path/to/N.E.K.O`, run Vite and
+build the Tauri executable. Then run `scripts/upstream-window-probe.py --browser
+/path/to/chromium` and `scripts/native-upstream-probe.py --binary
+/path/to/neko-tauri`. Python dependencies are aiohttp, Jinja2, Playwright and
+Python Xlib; the native Linux probe also needs Xvfb and KWin. Run against the
+isolated fixture, whose health identity must be verified before starting it.

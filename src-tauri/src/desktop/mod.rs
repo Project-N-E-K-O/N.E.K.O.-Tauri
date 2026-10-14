@@ -103,6 +103,7 @@ pub(crate) fn page_loaded(window: &tauri::WebviewWindow, finished: bool) -> Resu
             }
             if !finished {
                 record.ready = false;
+                record.content_ready = false;
             }
         }
     }

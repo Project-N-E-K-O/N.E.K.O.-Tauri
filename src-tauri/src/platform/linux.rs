@@ -43,7 +43,6 @@ const INPUT_SENTINEL: InputRectangle = InputRectangle {
 };
 const POINTER_HOT_ZONE_SIZE: i32 = 192;
 const DRAG_HOT_ZONE_SIZE: i32 = 768;
-const BACKEND_MEDIA_PORT: u16 = 48911;
 const NIRI_CONFIG_PATCH_DISABLE_ENV: &str = "NEKO_DISABLE_NIRI_CONFIG_PATCH";
 const NIRI_CONFIG_PATCH_BEGIN: &str = "// BEGIN N.E.K.O Tauri niri window rules";
 const NIRI_CONFIG_PATCH_END: &str = "// END N.E.K.O Tauri niri window rules";
@@ -211,6 +210,12 @@ fn is_niri_desktop_value(value: &str) -> bool {
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .any(|token| token.eq_ignore_ascii_case("niri"))
+}
+
+// WSLg drops XShape input regions; Windows already passes clicks through the
+// overlay's fully transparent pixels (layered window), so X must not filter them.
+fn is_wslg() -> bool {
+    std::env::var_os("WSL_DISTRO_NAME").is_some() && std::path::Path::new("/mnt/wslg").exists()
 }
 
 fn is_niri_desktop() -> bool {
@@ -411,7 +416,7 @@ fn is_trusted_media_origin(uri: &str) -> bool {
             url.host_str(),
             Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
         )
-        && url.port_or_known_default() == Some(BACKEND_MEDIA_PORT)
+        && url.port_or_known_default() == Some(crate::backend_runtime::main_server_port())
 }
 
 fn configure_media_permissions(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -1295,7 +1300,10 @@ pub(crate) fn startup_input_region(window: &tauri::WebviewWindow) -> Result<(), 
         gtk_window.realize();
         println!("[WindowVisibility] Linux 隐藏主窗口已完成 GTK realize");
     }
-    if let Some(rectangle) = static_input_region_diagnostic() {
+    if is_wslg() {
+        // Windows does the click-through on WSLg; keep the whole X window clickable.
+        println!("[ClickThrough] WSLg 跳过输入区域裁剪，整个窗口接收点击");
+    } else if let Some(rectangle) = static_input_region_diagnostic() {
         let actual = apply_static_input_region(&gtk_window, rectangle)?;
         println!(
             "[InputRegionDiagnostic] 启动时固定区域已核验: requested={rectangle:?} actual={actual:?}"
@@ -1315,6 +1323,10 @@ pub(crate) fn set_click_through(
     reason: &str,
     details: &str,
 ) -> Result<(), String> {
+    if is_wslg() {
+        return Ok(());
+    }
+
     let defer_for_niri = is_niri_desktop() && !NIRI_INPUT_REGION_READY.load(Ordering::SeqCst);
 
     if let Some(rectangle) = static_input_region_diagnostic() {

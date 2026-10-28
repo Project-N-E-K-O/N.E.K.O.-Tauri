@@ -3,12 +3,13 @@ mod platform;
 mod radar;
 mod screen_capture;
 
+use tauri::ipc::CapabilityBuilder;
 use tauri::webview::PageLoadEvent;
 use tauri::Manager;
 
 fn is_backend_page(url: &tauri::Url) -> bool {
     matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
-        && url.port_or_known_default() == Some(48911)
+        && url.port_or_known_default() == Some(backend_runtime::main_server_port())
 }
 
 fn should_reveal_main_window(label: &str, event: PageLoadEvent) -> bool {
@@ -113,6 +114,22 @@ pub fn run() {
             screen_capture::capture_screen_source
         ])
         .setup(|app| {
+            // Built at runtime because a static capability file cannot follow the port override.
+            app.add_capability(
+                CapabilityBuilder::new("local-backend")
+                    .remote(format!(
+                        "http://127.0.0.1:{}/*",
+                        backend_runtime::main_server_port()
+                    ))
+                    .local(false)
+                    .window("main")
+                    .permission("core:event:default")
+                    .permission("allow-set-click-through")
+                    .permission("allow-open-new-window")
+                    .permission("allow-get-screen-capture-capabilities")
+                    .permission("allow-get-screen-capture-sources")
+                    .permission("allow-capture-screen-source"),
+            )?;
             platform::configure_app(app);
             let window = app
                 .get_webview_window("main")

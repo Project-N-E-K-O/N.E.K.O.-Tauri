@@ -4,14 +4,29 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tauri::Manager;
 
-const MAIN_SERVER_ADDRESS: &str = "127.0.0.1:48911";
+const DEFAULT_MAIN_SERVER_PORT: u16 = 48911;
 const BACKEND_EXECUTABLE_ENV: &str = "NEKO_BACKEND_EXECUTABLE";
 const BACKEND_SOURCE_ENV: &str = "NEKO_BACKEND_DIR";
+
+/// Same lookup as N.E.K.O's `_read_port_env`: `NEKO_MAIN_SERVER_PORT`, then `MAIN_SERVER_PORT`.
+pub(crate) fn main_server_port() -> u16 {
+    static PORT: OnceLock<u16> = OnceLock::new();
+    *PORT.get_or_init(|| {
+        ["NEKO_MAIN_SERVER_PORT", "MAIN_SERVER_PORT"]
+            .iter()
+            .find_map(|key| parse_port(&env::var(key).ok()?))
+            .unwrap_or(DEFAULT_MAIN_SERVER_PORT)
+    })
+}
+
+fn parse_port(raw: &str) -> Option<u16> {
+    raw.trim().parse::<u16>().ok().filter(|port| *port != 0)
+}
 
 pub(crate) struct BackendProcess(Mutex<Option<Child>>);
 
@@ -22,7 +37,7 @@ struct BackendCommand {
 }
 
 fn main_server_is_ready() -> bool {
-    let address: SocketAddr = MAIN_SERVER_ADDRESS.parse().expect("主服务地址无效");
+    let address = SocketAddr::from(([127, 0, 0, 1], main_server_port()));
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(200)) else {
         return false;
     };
@@ -130,7 +145,8 @@ fn resolve_backend_command(app: &tauri::App) -> Result<BackendCommand, String> {
     }
 
     Err(format!(
-        "未找到 N.E.K.O 后端。请先启动端口 48911 的后端，或设置 {BACKEND_SOURCE_ENV}（源码目录）/ {BACKEND_EXECUTABLE_ENV}（构建产物）"
+        "未找到 N.E.K.O 后端。请先启动端口 {} 的后端，或设置 {BACKEND_SOURCE_ENV}（源码目录）/ {BACKEND_EXECUTABLE_ENV}（构建产物）",
+        main_server_port()
     ))
 }
 
@@ -168,7 +184,7 @@ pub(crate) fn wait_for_main_server(window: tauri::WebviewWindow) {
         for _ in 0..600 {
             if main_server_is_ready() {
                 platform::prepare_for_navigation(&window);
-                let mut main_url = format!("http://{MAIN_SERVER_ADDRESS}");
+                let mut main_url = format!("http://127.0.0.1:{}", main_server_port());
                 if let Some(query) = platform::diagnostic_query() {
                     main_url.push_str("/?");
                     main_url.push_str(query);
@@ -200,4 +216,19 @@ pub(crate) fn terminate(state: &BackendProcess) {
         let _ = process.wait();
     }
     *child = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_port;
+
+    #[test]
+    fn parses_port_overrides_like_the_backend() {
+        assert_eq!(parse_port("47911"), Some(47911));
+        assert_eq!(parse_port(" 47911 "), Some(47911));
+        assert_eq!(parse_port(""), None);
+        assert_eq!(parse_port("0"), None);
+        assert_eq!(parse_port("65536"), None);
+        assert_eq!(parse_port("abc"), None);
+    }
 }

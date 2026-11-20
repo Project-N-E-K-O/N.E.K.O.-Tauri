@@ -77,6 +77,8 @@ NEKO_BACKEND_EXECUTABLE=/absolute/path/to/projectneko_server npm run tauri:dev
 
 当 `48911` 端口已经存在 N.E.K.O 服务时，桌面壳只会连接，不会在退出时关闭外部启动的后端。
 
+后端改了端口时，用和 N.E.K.O 相同的环境变量告诉桌面壳，例如 `NEKO_MAIN_SERVER_PORT=47911 npm run tauri:dev`。`npm run dev` 的代理同样读取 `NEKO_MEMORY_SERVER_PORT` 和 `NEKO_TOOL_SERVER_PORT`。
+
 ## 测试
 
 ```bash

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,6 +29,7 @@ static NIRI_DIAGNOSTIC_LAST_SURFACE_ID: AtomicU32 = AtomicU32::new(0);
 
 const STATIC_INPUT_REGION_ENV: &str = "NEKO_X11_STATIC_INPUT_REGION";
 const INPUT_REGION_DIAGNOSTIC_ENV: &str = "NEKO_TAURI_INPUT_REGION_DIAGNOSTIC";
+const WSLG_BYPASS_DISABLE_ENV: &str = "NEKO_DISABLE_WSLG_BYPASS";
 const STATIC_INPUT_REGION_DEFAULT: InputRectangle = InputRectangle {
     x: 24,
     y: 24,
@@ -43,7 +44,6 @@ const INPUT_SENTINEL: InputRectangle = InputRectangle {
 };
 const POINTER_HOT_ZONE_SIZE: i32 = 192;
 const DRAG_HOT_ZONE_SIZE: i32 = 768;
-const BACKEND_MEDIA_PORT: u16 = 48911;
 const NIRI_CONFIG_PATCH_DISABLE_ENV: &str = "NEKO_DISABLE_NIRI_CONFIG_PATCH";
 const NIRI_CONFIG_PATCH_BEGIN: &str = "// BEGIN N.E.K.O Tauri niri window rules";
 const NIRI_CONFIG_PATCH_END: &str = "// END N.E.K.O Tauri niri window rules";
@@ -211,6 +211,65 @@ fn is_niri_desktop_value(value: &str) -> bool {
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .any(|token| token.eq_ignore_ascii_case("niri"))
+}
+
+/// Whether the current X connection is WSLg's own X server (XWayland on a
+/// local Unix socket), not a third-party server such as VcXsrv/X410.
+///
+/// WSLg drops XShape input regions, and Windows' layered window already passes
+/// clicks through the overlay's fully transparent pixels, so the whole X
+/// window must stay clickable there. Third-party servers do NOT do that, and
+/// niri uses the native Wayland input-region path — in both cases the usual
+/// XShape / Wayland handling must stay in force.
+fn wslg_environment_detected(
+    has_wsl_distro: bool,
+    has_wslg_mount: bool,
+    display: Option<&str>,
+    native_wayland: bool,
+    bypass_disabled: bool,
+) -> bool {
+    if bypass_disabled || native_wayland || !has_wsl_distro || !has_wslg_mount {
+        return false;
+    }
+
+    display.is_some_and(|value| {
+        let value = value.trim();
+        // WSLg's XWayland listens on display 0 of the local socket. Other
+        // local displays (Xephyr on ":1") are full nested X servers without
+        // Windows' layered-window click-through, so they must keep XShape.
+        // Host-qualified forms ("host:0" / "localhost:0" from VcXsrv/X410)
+        // are rejected by the missing empty-host check.
+        let number = if let Some(rest) = value
+            .strip_prefix("unix:")
+            .or_else(|| value.strip_prefix("unix/:"))
+        {
+            // Explicit local transport: "unix:0" / "unix/:0" (X11 syntax).
+            rest
+        } else {
+            // Local socket: ":0" / ":0.0". A host-qualified form
+            // ("host:0", "localhost:0", "127.0.0.1:0") has no leading colon
+            // and is rejected, keeping XShape active for VcXsrv/X410.
+            let Some(number) = value.strip_prefix(':') else {
+                return false;
+            };
+            number
+        };
+        let number = number.split('.').next().unwrap_or(number);
+        number == "0"
+    })
+}
+
+fn is_wslg() -> bool {
+    static IS_WSLG: OnceLock<bool> = OnceLock::new();
+    *IS_WSLG.get_or_init(|| {
+        wslg_environment_detected(
+            std::env::var_os("WSL_DISTRO_NAME").is_some(),
+            std::path::Path::new("/mnt/wslg").exists(),
+            std::env::var("DISPLAY").ok().as_deref(),
+            uses_native_wayland_backend() || is_niri_desktop(),
+            std::env::var_os(WSLG_BYPASS_DISABLE_ENV).is_some(),
+        )
+    })
 }
 
 fn is_niri_desktop() -> bool {
@@ -401,7 +460,7 @@ fn ensure_niri_window_rule_installed() -> Result<Option<PathBuf>, String> {
     Ok(Some(backup_path))
 }
 
-fn is_trusted_media_origin(uri: &str) -> bool {
+fn is_trusted_media_origin_on_port(uri: &str, port: u16) -> bool {
     let Ok(url) = tauri::Url::parse(uri) else {
         return false;
     };
@@ -411,7 +470,11 @@ fn is_trusted_media_origin(uri: &str) -> bool {
             url.host_str(),
             Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
         )
-        && url.port_or_known_default() == Some(BACKEND_MEDIA_PORT)
+        && url.port_or_known_default() == Some(port)
+}
+
+fn is_trusted_media_origin(uri: &str) -> bool {
+    is_trusted_media_origin_on_port(uri, crate::backend_runtime::main_server_port())
 }
 
 fn configure_media_permissions(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -1295,7 +1358,10 @@ pub(crate) fn startup_input_region(window: &tauri::WebviewWindow) -> Result<(), 
         gtk_window.realize();
         println!("[WindowVisibility] Linux 隐藏主窗口已完成 GTK realize");
     }
-    if let Some(rectangle) = static_input_region_diagnostic() {
+    if is_wslg() {
+        // Windows does the click-through on WSLg; keep the whole X window clickable.
+        println!("[ClickThrough] WSLg 跳过输入区域裁剪，整个窗口接收点击");
+    } else if let Some(rectangle) = static_input_region_diagnostic() {
         let actual = apply_static_input_region(&gtk_window, rectangle)?;
         println!(
             "[InputRegionDiagnostic] 启动时固定区域已核验: requested={rectangle:?} actual={actual:?}"
@@ -1315,6 +1381,10 @@ pub(crate) fn set_click_through(
     reason: &str,
     details: &str,
 ) -> Result<(), String> {
+    if is_wslg() {
+        return Ok(());
+    }
+
     let defer_for_niri = is_niri_desktop() && !NIRI_INPUT_REGION_READY.load(Ordering::SeqCst);
 
     if let Some(rectangle) = static_input_region_diagnostic() {
@@ -1468,10 +1538,11 @@ pub(crate) fn open_settings_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_kde_desktop_value, is_niri_desktop_value, is_trusted_media_origin,
+        is_kde_desktop_value, is_niri_desktop_value, is_trusted_media_origin_on_port,
         merge_niri_managed_config, niri_managed_config_block, pointer_input_rectangles,
-        static_input_region_diagnostic, InputRectangle, INPUT_SENTINEL, NIRI_CONFIG_PATCH_BEGIN,
-        NIRI_CONFIG_PATCH_END, STATIC_INPUT_REGION_DEFAULT, STATIC_INPUT_REGION_ENV,
+        static_input_region_diagnostic, wslg_environment_detected, InputRectangle, INPUT_SENTINEL,
+        NIRI_CONFIG_PATCH_BEGIN, NIRI_CONFIG_PATCH_END, STATIC_INPUT_REGION_DEFAULT,
+        STATIC_INPUT_REGION_ENV,
     };
 
     #[test]
@@ -1489,6 +1560,87 @@ mod tests {
         for value in ["GNOME", "ubuntu:GNOME", "X-Cinnamon", "XFCE", ""] {
             assert!(!is_kde_desktop_value(value), "{value}");
         }
+    }
+
+    #[test]
+    fn detects_only_the_local_wslg_x_server() {
+        // The genuine WSLg case: WSL2 distro + /mnt/wslg + local X socket.
+        assert!(wslg_environment_detected(
+            true,
+            true,
+            Some(":0"),
+            false,
+            false
+        ));
+        assert!(wslg_environment_detected(
+            true,
+            true,
+            Some(" :0.0 "),
+            false,
+            false
+        ));
+        assert!(wslg_environment_detected(
+            true,
+            true,
+            Some("unix:0"),
+            false,
+            false
+        ));
+
+        // A nested local X server (Xephyr on :1) is not WSLg's XWayland.
+        for display in [":1", ":1.0", "unix:1", "unix/:1", ":10"] {
+            assert!(
+                !wslg_environment_detected(true, true, Some(display), false, false),
+                "{display}"
+            );
+        }
+
+        // Third-party X servers on the same WSLg-enabled machine keep XShape.
+        for display in ["localhost:0", "127.0.0.1:0", "172.28.0.1:0", "host:0"] {
+            assert!(
+                !wslg_environment_detected(true, true, Some(display), false, false),
+                "{display}"
+            );
+        }
+
+        // Missing prerequisites, native Wayland (niri nested in WSLg), an
+        // absent DISPLAY, and the kill switch all disable the bypass.
+        assert!(!wslg_environment_detected(
+            false,
+            true,
+            Some(":0"),
+            false,
+            false
+        ));
+        assert!(!wslg_environment_detected(
+            true,
+            false,
+            Some(":0"),
+            false,
+            false
+        ));
+        assert!(!wslg_environment_detected(
+            true,
+            true,
+            Some(":0"),
+            true,
+            false
+        ));
+        assert!(!wslg_environment_detected(true, true, None, false, false));
+        assert!(!wslg_environment_detected(
+            true,
+            true,
+            Some(":0"),
+            false,
+            true
+        ));
+        assert!(!wslg_environment_detected(
+            true,
+            true,
+            Some(""),
+            false,
+            false
+        ));
     }
 
     #[test]
@@ -1528,19 +1680,38 @@ mod tests {
 
     #[test]
     fn allows_media_only_from_the_local_backend_origin() {
-        assert!(is_trusted_media_origin("http://127.0.0.1:48911/"));
-        assert!(is_trusted_media_origin(
-            "http://localhost:48911/settings?tab=microphone"
-        ));
-        assert!(is_trusted_media_origin("http://[::1]:48911/"));
+        for port in [48911, 47911] {
+            assert!(is_trusted_media_origin_on_port(
+                &format!("http://127.0.0.1:{port}/"),
+                port
+            ));
+            assert!(is_trusted_media_origin_on_port(
+                &format!("http://localhost:{port}/settings?tab=microphone"),
+                port
+            ));
+            assert!(is_trusted_media_origin_on_port(
+                &format!("http://[::1]:{port}/"),
+                port
+            ));
 
-        assert!(!is_trusted_media_origin("http://127.0.0.1:1420/"));
-        assert!(!is_trusted_media_origin("https://127.0.0.1:48911/"));
-        assert!(!is_trusted_media_origin("http://example.com:48911/"));
-        assert!(!is_trusted_media_origin(
-            "http://127.0.0.1.evil.example:48911/"
-        ));
-        assert!(!is_trusted_media_origin("not a url"));
+            assert!(!is_trusted_media_origin_on_port(
+                "http://127.0.0.1:1420/",
+                port
+            ));
+            assert!(!is_trusted_media_origin_on_port(
+                &format!("https://127.0.0.1:{port}/"),
+                port
+            ));
+            assert!(!is_trusted_media_origin_on_port(
+                &format!("http://example.com:{port}/"),
+                port
+            ));
+            assert!(!is_trusted_media_origin_on_port(
+                &format!("http://127.0.0.1.evil.example:{port}/"),
+                port
+            ));
+            assert!(!is_trusted_media_origin_on_port("not a url", port));
+        }
     }
 
     #[test]

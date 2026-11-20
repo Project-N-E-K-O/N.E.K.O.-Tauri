@@ -7,9 +7,13 @@ use tauri::ipc::CapabilityBuilder;
 use tauri::webview::PageLoadEvent;
 use tauri::Manager;
 
-fn is_backend_page(url: &tauri::Url) -> bool {
+fn is_backend_page_on_port(url: &tauri::Url, port: u16) -> bool {
     matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
-        && url.port_or_known_default() == Some(backend_runtime::main_server_port())
+        && url.port_or_known_default() == Some(port)
+}
+
+fn is_backend_page(url: &tauri::Url) -> bool {
+    is_backend_page_on_port(url, backend_runtime::main_server_port())
 }
 
 fn should_reveal_main_window(label: &str, event: PageLoadEvent) -> bool {
@@ -158,20 +162,25 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_backend_page, should_reveal_main_window};
+    use super::{is_backend_page_on_port, should_reveal_main_window};
     use tauri::webview::PageLoadEvent;
 
     #[test]
     fn injects_native_hit_test_only_into_the_backend_page() {
-        let backend = tauri::Url::parse("http://127.0.0.1:48911/").unwrap();
-        let backend_localhost = tauri::Url::parse("http://localhost:48911/chat").unwrap();
-        let vite_startup = tauri::Url::parse("http://127.0.0.1:1420/").unwrap();
-        let unrelated = tauri::Url::parse("https://example.com:48911/").unwrap();
+        for port in [48911, 47911] {
+            let backend = tauri::Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+            let backend_localhost =
+                tauri::Url::parse(&format!("http://localhost:{port}/chat")).unwrap();
+            let vite_startup = tauri::Url::parse("http://127.0.0.1:1420/").unwrap();
+            let other_port = tauri::Url::parse("http://127.0.0.1:48912/").unwrap();
+            let unrelated = tauri::Url::parse(&format!("https://example.com:{port}/")).unwrap();
 
-        assert!(is_backend_page(&backend));
-        assert!(is_backend_page(&backend_localhost));
-        assert!(!is_backend_page(&vite_startup));
-        assert!(!is_backend_page(&unrelated));
+            assert!(is_backend_page_on_port(&backend, port));
+            assert!(is_backend_page_on_port(&backend_localhost, port));
+            assert!(!is_backend_page_on_port(&vite_startup, port));
+            assert!(!is_backend_page_on_port(&other_port, port));
+            assert!(!is_backend_page_on_port(&unrelated, port));
+        }
     }
 
     #[test]

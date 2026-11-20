@@ -234,10 +234,28 @@ fn wslg_environment_detected(
 
     display.is_some_and(|value| {
         let value = value.trim();
-        // WSLg listens on a local socket: DISPLAY=":0" or ":0.0"; "unix:0" is
-        // the explicit local form. Anything with a host part (VcXsrv/X410:
-        // "host:0", or "localhost:0" under mirrored networking) keeps XShape.
-        value.starts_with(':') || value.starts_with("unix:")
+        // WSLg's XWayland listens on display 0 of the local socket. Other
+        // local displays (Xephyr on ":1") are full nested X servers without
+        // Windows' layered-window click-through, so they must keep XShape.
+        // Host-qualified forms ("host:0" / "localhost:0" from VcXsrv/X410)
+        // are rejected by the missing empty-host check.
+        let number = if let Some(rest) = value
+            .strip_prefix("unix:")
+            .or_else(|| value.strip_prefix("unix/:"))
+        {
+            // Explicit local transport: "unix:0" / "unix/:0" (X11 syntax).
+            rest
+        } else {
+            // Local socket: ":0" / ":0.0". A host-qualified form
+            // ("host:0", "localhost:0", "127.0.0.1:0") has no leading colon
+            // and is rejected, keeping XShape active for VcXsrv/X410.
+            let Some(number) = value.strip_prefix(':') else {
+                return false;
+            };
+            number
+        };
+        let number = number.split('.').next().unwrap_or(number);
+        number == "0"
     })
 }
 
@@ -1568,6 +1586,14 @@ mod tests {
             false,
             false
         ));
+
+        // A nested local X server (Xephyr on :1) is not WSLg's XWayland.
+        for display in [":1", ":1.0", "unix:1", "unix/:1", ":10"] {
+            assert!(
+                !wslg_environment_detected(true, true, Some(display), false, false),
+                "{display}"
+            );
+        }
 
         // Third-party X servers on the same WSLg-enabled machine keep XShape.
         for display in ["localhost:0", "127.0.0.1:0", "172.28.0.1:0", "host:0"] {
